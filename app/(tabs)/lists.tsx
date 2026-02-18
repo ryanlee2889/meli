@@ -7,8 +7,6 @@ import {
   StyleSheet,
   FlatList,
   Pressable,
-  Alert,
-  TextInput,
   Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -27,7 +25,6 @@ type List = {
   title: string;
   description: string | null;
   is_public: boolean;
-  is_collaborative: boolean;
   item_count?: number;
   created_at: string;
 };
@@ -49,7 +46,7 @@ export default function ListsScreen() {
     const { data } = await supabase
       .from('lists')
       .select('*')
-      .eq('owner_user_id', user.id)
+      .eq('owner_id', user.id)
       .order('created_at', { ascending: false });
 
     setLists(data ?? []);
@@ -102,14 +99,9 @@ export default function ListsScreen() {
                   <Text variant="title" style={{ flex: 1 }} numberOfLines={1}>
                     {item.title}
                   </Text>
-                  <View style={{ flexDirection: 'row', gap: spacing[2] }}>
-                    {item.is_collaborative && (
-                      <Badge label="Collab" variant="accent" />
-                    )}
-                    {item.is_public && (
-                      <Badge label="Public" variant="neutral" />
-                    )}
-                  </View>
+                  {item.is_public && (
+                    <Badge label="Public" variant="neutral" />
+                  )}
                 </View>
                 {item.description && (
                   <Text variant="caption" color="secondary" numberOfLines={2}>
@@ -150,29 +142,30 @@ function CreateListModal({
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [isPublic, setIsPublic] = useState(false);
-  const [isCollaborative, setIsCollaborative] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function handleCreate() {
     if (!title.trim()) return;
     setLoading(true);
+    setError(null);
 
     const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
+    if (!user) { setLoading(false); return; }
 
-    const { data, error } = await supabase
+    const { data, error: insertError } = await supabase
       .from('lists')
       .insert({
-        owner_user_id: user.id,
+        owner_id: user.id,
         title: title.trim(),
         description: description.trim() || null,
         is_public: isPublic,
-        is_collaborative: isCollaborative,
       })
       .select()
       .single();
 
     setLoading(false);
+    if (insertError) { setError(insertError.message); return; }
     if (data) onCreated(data);
   }
 
@@ -203,22 +196,20 @@ function CreateListModal({
             numberOfLines={3}
           />
 
-          {/* Toggles */}
           <ToggleRow
             label="Public"
             description="Anyone can view this list"
             value={isPublic}
             onToggle={() => setIsPublic((v) => !v)}
           />
-          <ToggleRow
-            label="Collaborative"
-            description="Invite others to add tracks"
-            value={isCollaborative}
-            onToggle={() => setIsCollaborative((v) => !v)}
-          />
         </View>
 
         <View style={styles.modalFooter}>
+          {error && (
+            <Text variant="caption" color="negative" align="center" style={{ marginBottom: spacing[3] }}>
+              {error}
+            </Text>
+          )}
           <Button
             label="Create list"
             variant="primary"
