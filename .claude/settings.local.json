@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(npx expo-doctor:*)",
+      "Bash(npx expo install:*)",
+      "Bash(git -C /Users/ryan/Documents/Projects/vibecheck ls-files:*)",
+      "Bash(git -C /Users/ryan/Documents/Projects/vibecheck rm -r --cached:*)"
+    ]
+  }
+}
