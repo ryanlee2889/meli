@@ -4,6 +4,15 @@
       "eas": {
         "projectId": "0e39f121-eede-41fd-8166-e3acca65b339"
       }
+    },
+    "ios": {
+      "bundleIdentifier": "com.ryanlee2889.vibecheck",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "com.ryanlee2889.vibecheck"
     }
   }
 }
