@@ -1,7 +1,7 @@
 /**
  * Discover — swipe/rate flow.
  * Fetches a batch of tracks, renders SwipeCard deck,
- * shows RatingControl after a right swipe.
+ * shows RatingControl then optional "Add to list" after rating.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -10,21 +10,21 @@ import {
   Dimensions,
   Pressable,
   ActivityIndicator,
+  FlatList,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
-import { LinearGradient } from 'expo-linear-gradient';
 import { useTheme } from '@/hooks/useTheme';
 import { Text } from '@/components/ui/Text';
+import { Button } from '@/components/ui/Button';
 import { SwipeCard, type Track } from '@/components/SwipeCard';
 import { RatingControl } from '@/components/RatingControl';
-import { spacing } from '@/theme';
+import { spacing, radii } from '@/theme';
 import { supabase } from '@/lib/supabase';
 
 const { width, height } = Dimensions.get('window');
 const VISIBLE_CARDS = 3;
 
-// Mock data — replace with API call to /discover endpoint
 const MOCK_TRACKS: Track[] = [
   {
     id: '1',
@@ -68,23 +68,54 @@ const MOCK_TRACKS: Track[] = [
   },
 ];
 
+type RatedTrack = {
+  track: Track;
+  itemId: string;
+  score: number;
+};
+
+type UserList = {
+  id: string;
+  title: string;
+};
+
 export default function DiscoverScreen() {
   const { colors, isDark } = useTheme();
   const [tracks, setTracks] = useState<Track[]>(MOCK_TRACKS);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [pendingRating, setPendingRating] = useState<Track | null>(null);
+  const [ratedTrack, setRatedTrack] = useState<RatedTrack | null>(null);
+  const [userLists, setUserLists] = useState<UserList[]>([]);
+  const [listsLoading, setListsLoading] = useState(false);
+  const [addingToList, setAddingToList] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const currentTrack = tracks[currentIndex] ?? null;
   const visibleTracks = tracks.slice(currentIndex, currentIndex + VISIBLE_CARDS);
 
+  // Load user lists when the add-to-list step becomes visible
+  useEffect(() => {
+    if (!ratedTrack) return;
+    setListsLoading(true);
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (!user) { setListsLoading(false); return; }
+      supabase
+        .from('lists')
+        .select('id, title')
+        .eq('owner_id', user.id)
+        .order('created_at', { ascending: false })
+        .then(({ data }) => {
+          setUserLists(data ?? []);
+          setListsLoading(false);
+        });
+    });
+  }, [ratedTrack]);
+
   function handleSwipeLeft() {
-    // Skip — move to next card
     setCurrentIndex((i) => i + 1);
   }
 
   function handleSwipeRight() {
-    // Like — prompt rating
     if (currentTrack) {
       setPendingRating(currentTrack);
       setCurrentIndex((i) => i + 1);
@@ -94,18 +125,62 @@ export default function DiscoverScreen() {
   async function handleRatingSubmit(score: number) {
     if (!pendingRating) return;
 
-    // TODO: upsert rating to Supabase
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) { dismissSheet(); return; }
+
+    // 1. Upsert track into items cache
+    const { data: itemData } = await supabase
+      .from('items')
+      .upsert({
+        spotify_id: pendingRating.spotifyId,
+        type: 'track',
+        name: pendingRating.name,
+        image_url: pendingRating.imageUrl,
+        artists_json: pendingRating.artists,
+        genres_json: [],
+        raw_json: {},
+      }, { onConflict: 'spotify_id,type' })
+      .select('id')
+      .single();
+
+    if (!itemData) { dismissSheet(); return; }
+
+    // 2. Upsert rating
+    await supabase.from('ratings').upsert({
+      user_id: user.id,
+      item_id: itemData.id,
+      score,
+    }, { onConflict: 'user_id,item_id' });
+
+    // 3. Transition to "add to list" step
+    setPendingRating(null);
+    setRatedTrack({ track: pendingRating, itemId: itemData.id, score });
+  }
+
+  async function handleAddToList(listId: string) {
+    if (!ratedTrack) return;
+    setAddingToList(listId);
+
     const { data: { user } } = await supabase.auth.getUser();
     if (user) {
-      // supabase.from('ratings').upsert({ user_id: user.id, item_id: pendingRating.id, score })
+      await supabase.from('list_items').upsert({
+        list_id: listId,
+        item_id: ratedTrack.itemId,
+        added_by: user.id,
+      }, { onConflict: 'list_id,item_id' });
     }
 
-    setPendingRating(null);
+    setAddingToList(null);
+    dismissSheet();
   }
 
-  function handleRatingSkip() {
+  function dismissSheet() {
     setPendingRating(null);
+    setRatedTrack(null);
+    setUserLists([]);
   }
+
+  const sheetVisible = pendingRating !== null || ratedTrack !== null;
 
   if (loading) {
     return (
@@ -120,14 +195,7 @@ export default function DiscoverScreen() {
       <SafeAreaView style={{ flex: 1 }} edges={['top']}>
         {/* Header */}
         <View style={styles.header}>
-          <Text
-            style={{
-              fontSize: 22,
-              fontWeight: '800',
-              color: colors.text,
-              letterSpacing: -0.5,
-            }}
-          >
+          <Text style={{ fontSize: 22, fontWeight: '800', color: colors.text, letterSpacing: -0.5 }}>
             Discover
           </Text>
           <Pressable onPress={() => router.push('/settings')}>
@@ -154,11 +222,7 @@ export default function DiscoverScreen() {
           </View>
         ) : (
           <View style={styles.emptyState}>
-            <Text
-              style={{ fontSize: 40, textAlign: 'center' }}
-            >
-              ◈
-            </Text>
+            <Text style={{ fontSize: 40, textAlign: 'center' }}>◈</Text>
             <Text variant="h3" align="center" style={{ marginTop: spacing[3] }}>
               You're all caught up
             </Text>
@@ -171,38 +235,93 @@ export default function DiscoverScreen() {
         {/* Swipe hint */}
         {currentTrack && (
           <View style={styles.hint}>
-            <Text variant="caption" color="tertiary">
-              ← pass
-            </Text>
-            <Text
-              style={{
-                fontSize: 11,
-                color: colors.textTertiary,
-                textAlign: 'center',
-              }}
-            >
+            <Text variant="caption" color="tertiary">← pass</Text>
+            <Text style={{ fontSize: 11, color: colors.textTertiary, textAlign: 'center' }}>
               Swipe to rate
             </Text>
-            <Text variant="caption" color="tertiary">
-              love →
-            </Text>
+            <Text variant="caption" color="tertiary">love →</Text>
           </View>
         )}
       </SafeAreaView>
 
-      {/* Rating sheet — slides up from bottom */}
-      {pendingRating && (
+      {/* Rating / add-to-list sheet */}
+      {sheetVisible && (
         <View style={[styles.ratingOverlay, { backgroundColor: colors.scrim }]}>
-          <Pressable
-            style={StyleSheet.absoluteFill}
-            onPress={handleRatingSkip}
-          />
+          <Pressable style={StyleSheet.absoluteFill} onPress={dismissSheet} />
           <View style={[styles.ratingSheet, { backgroundColor: colors.bg }]}>
-            <RatingControl
-              trackName={pendingRating.name}
-              onSubmit={handleRatingSubmit}
-              onSkip={handleRatingSkip}
-            />
+
+            {/* Phase 1: Rate */}
+            {pendingRating && (
+              <RatingControl
+                trackName={pendingRating.name}
+                onSubmit={handleRatingSubmit}
+                onSkip={dismissSheet}
+              />
+            )}
+
+            {/* Phase 2: Add to list */}
+            {ratedTrack && (
+              <View style={styles.addToList}>
+                {/* Confirmation */}
+                <View style={styles.ratedConfirm}>
+                  <Text variant="label" color="secondary" align="center">Rated</Text>
+                  <Text
+                    style={{ fontSize: 42, fontWeight: '900', color: colors.text, textAlign: 'center', lineHeight: 48 }}
+                  >
+                    {ratedTrack.score}
+                    <Text style={{ fontSize: 20, color: colors.textSecondary }}>/10</Text>
+                  </Text>
+                  <Text variant="title" align="center" numberOfLines={1}>
+                    {ratedTrack.track.name}
+                  </Text>
+                </View>
+
+                {/* List picker */}
+                <View style={styles.listPickerHeader}>
+                  <Text variant="label" color="secondary">Save to a list</Text>
+                </View>
+
+                {listsLoading ? (
+                  <ActivityIndicator color={colors.accent} style={{ marginVertical: spacing[4] }} />
+                ) : userLists.length === 0 ? (
+                  <Text variant="body" color="tertiary" align="center" style={{ marginVertical: spacing[3] }}>
+                    No lists yet — create one in the Lists tab.
+                  </Text>
+                ) : (
+                  <FlatList
+                    data={userLists}
+                    keyExtractor={(l) => l.id}
+                    scrollEnabled={userLists.length > 4}
+                    style={{ maxHeight: 200 }}
+                    ItemSeparatorComponent={() => (
+                      <View style={[styles.listSep, { backgroundColor: colors.border }]} />
+                    )}
+                    renderItem={({ item }) => (
+                      <Pressable
+                        style={styles.listRow}
+                        onPress={() => handleAddToList(item.id)}
+                        disabled={addingToList !== null}
+                      >
+                        <Text variant="bodyMedium" style={{ flex: 1 }}>{item.title}</Text>
+                        {addingToList === item.id
+                          ? <ActivityIndicator size="small" color={colors.accent} />
+                          : <Text style={{ fontSize: 18, color: colors.accent }}>+</Text>
+                        }
+                      </Pressable>
+                    )}
+                  />
+                )}
+
+                <Button
+                  label="Done"
+                  variant="ghost"
+                  size="md"
+                  fullWidth
+                  onPress={dismissSheet}
+                  style={{ marginTop: spacing[3] }}
+                />
+              </View>
+            )}
           </View>
         </View>
       )}
@@ -242,9 +361,30 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   ratingSheet: {
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
+    borderTopLeftRadius: radii['2xl'],
+    borderTopRightRadius: radii['2xl'],
     padding: spacing[5],
     paddingBottom: spacing[10],
+  },
+  // Add to list phase
+  addToList: {
+    gap: spacing[2],
+  },
+  ratedConfirm: {
+    alignItems: 'center',
+    gap: spacing[1],
+    paddingBottom: spacing[3],
+  },
+  listPickerHeader: {
+    paddingBottom: spacing[2],
+  },
+  listRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: spacing[3],
+    gap: spacing[3],
+  },
+  listSep: {
+    height: 1,
   },
 });

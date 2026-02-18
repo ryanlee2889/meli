@@ -17,12 +17,11 @@ type ListDetail = {
   title: string;
   description: string | null;
   is_public: boolean;
-  is_collaborative: boolean;
 };
 
 type ListItem = {
   item_id: string;
-  created_at: string;
+  added_at: string;
   items: {
     id: string;
     name: string;
@@ -50,7 +49,7 @@ export default function ListDetailScreen() {
         .from('list_items')
         .select('*, items(*), added_by:profiles(username)')
         .eq('list_id', id)
-        .order('created_at', { ascending: false }),
+        .order('added_at', { ascending: false }),
     ]);
 
     setList(listData);
@@ -93,10 +92,9 @@ export default function ListDetailScreen() {
               >
                 {list.title}
               </Text>
-              <View style={{ flexDirection: 'row', gap: spacing[2] }}>
-                {list.is_collaborative && <Badge label="Collab" variant="accent" />}
-                {list.is_public && <Badge label="Public" variant="neutral" />}
-              </View>
+              {list.is_public && (
+                <Badge label="Public" variant="neutral" />
+              )}
             </View>
 
             {list.description && (
