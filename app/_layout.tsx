@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { Stack, router } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StyleSheet } from 'react-native';
 import { ThemeProvider, useThemeContext } from '@/providers/ThemeProvider';
 import { supabase } from '@/lib/supabase';
@@ -71,9 +72,11 @@ function RootLayoutInner() {
 export default function RootLayout() {
   return (
     <GestureHandlerRootView style={styles.root}>
-      <ThemeProvider>
-        <RootLayoutInner />
-      </ThemeProvider>
+      <SafeAreaProvider>
+        <ThemeProvider>
+          <RootLayoutInner />
+        </ThemeProvider>
+      </SafeAreaProvider>
     </GestureHandlerRootView>
   );
 }

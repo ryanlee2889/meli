@@ -39,12 +39,29 @@ export function Text({
     inverse: colors.textInverse,
   };
 
+  const variantStyle = textStyles[variant] as Record<string, any>;
+  const flatStyle = StyleSheet.flatten(style) as Record<string, any> | undefined;
+
+  // When a caller overrides fontSize without providing lineHeight, the variant's
+  // lineHeight (sized for the variant's own fontSize) will clip the larger text.
+  // Recompute lineHeight based on the actual fontSize being rendered.
+  let lineHeightFix: { lineHeight?: number } = {};
+  if (
+    flatStyle?.fontSize &&
+    flatStyle.fontSize !== variantStyle.fontSize &&
+    !flatStyle.lineHeight &&
+    variantStyle.lineHeight
+  ) {
+    lineHeightFix = { lineHeight: Math.round(flatStyle.fontSize * 1.3) };
+  }
+
   return (
     <RNText
       style={[
-        textStyles[variant],
+        variantStyle,
         { color: colorMap[color] },
         align ? { textAlign: align } : undefined,
+        lineHeightFix,
         style,
       ]}
       {...props}
