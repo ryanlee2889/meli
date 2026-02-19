@@ -5,7 +5,9 @@
       "Bash(npx expo-doctor:*)",
       "Bash(npx expo install:*)",
       "Bash(git -C /Users/ryan/Documents/Projects/vibecheck ls-files:*)",
-      "Bash(git -C /Users/ryan/Documents/Projects/vibecheck rm -r --cached:*)"
+      "Bash(git -C /Users/ryan/Documents/Projects/vibecheck rm -r --cached:*)",
+      "Bash(npx tsc:*)",
+      "Bash(ls:*)"
     ]
   }
 }

@@ -1,5 +1,5 @@
 /**
- * Lists screen — personal + collaborative lists.
+ * Lists screen — personal lists with cover art and real counts.
  */
 import { useEffect, useState } from 'react';
 import {
@@ -8,6 +8,7 @@ import {
   FlatList,
   Pressable,
   Modal,
+  Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -25,8 +26,9 @@ type List = {
   title: string;
   description: string | null;
   is_public: boolean;
-  item_count?: number;
   created_at: string;
+  itemCount: number;
+  coverUrl: string | null;
 };
 
 export default function ListsScreen() {
@@ -43,22 +45,51 @@ export default function ListsScreen() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
-    const { data } = await supabase
+    const { data: rawLists } = await supabase
       .from('lists')
-      .select('*')
+      .select('id, title, description, is_public, created_at')
       .eq('owner_id', user.id)
       .order('created_at', { ascending: false });
 
-    setLists(data ?? []);
+    if (!rawLists || rawLists.length === 0) {
+      setLists([]);
+      setLoading(false);
+      return;
+    }
+
+    const listIds = rawLists.map((l) => l.id);
+
+    // Fetch all list_items for these lists in one query
+    const { data: listItems } = await supabase
+      .from('list_items')
+      .select('list_id, items(image_url)')
+      .in('list_id', listIds);
+
+    // Build cover + count maps
+    const countMap: Record<string, number> = {};
+    const coverMap: Record<string, string | null> = {};
+
+    for (const item of listItems ?? []) {
+      countMap[item.list_id] = (countMap[item.list_id] ?? 0) + 1;
+      if (!coverMap[item.list_id]) {
+        coverMap[item.list_id] = (item.items as any)?.image_url ?? null;
+      }
+    }
+
+    setLists(
+      rawLists.map((l) => ({
+        ...l,
+        itemCount: countMap[l.id] ?? 0,
+        coverUrl: coverMap[l.id] ?? null,
+      }))
+    );
     setLoading(false);
   }
 
   return (
     <SafeAreaView style={[styles.root, { backgroundColor: colors.bg }]} edges={['top']}>
       <View style={styles.header}>
-        <Text
-          style={{ fontSize: 22, fontWeight: '800', color: colors.text, letterSpacing: -0.5 }}
-        >
+        <Text style={{ fontSize: 22, fontWeight: '800', color: colors.text, letterSpacing: -0.5 }}>
           Lists
         </Text>
         <Button
@@ -78,13 +109,14 @@ export default function ListsScreen() {
           <Text variant="body" color="secondary" align="center" style={{ marginTop: spacing[2] }}>
             Create lists to organise your ratings and share with friends.
           </Text>
-          <Button
-            label="Create first list"
-            variant="primary"
-            size="md"
-            onPress={() => setShowCreate(true)}
-            style={{ marginTop: spacing[4] }}
-          />
+          <View style={{ marginTop: spacing[4] }}>
+            <Button
+              label="Create first list"
+              variant="primary"
+              size="md"
+              onPress={() => setShowCreate(true)}
+            />
+          </View>
         </View>
       ) : (
         <FlatList
@@ -94,24 +126,7 @@ export default function ListsScreen() {
           ItemSeparatorComponent={() => <View style={{ height: spacing[3] }} />}
           renderItem={({ item }) => (
             <Pressable onPress={() => router.push(`/list/${item.id}`)}>
-              <Card gap={spacing[2]}>
-                <View style={styles.listItemHeader}>
-                  <Text variant="title" style={{ flex: 1 }} numberOfLines={1}>
-                    {item.title}
-                  </Text>
-                  {item.is_public && (
-                    <Badge label="Public" variant="neutral" />
-                  )}
-                </View>
-                {item.description && (
-                  <Text variant="caption" color="secondary" numberOfLines={2}>
-                    {item.description}
-                  </Text>
-                )}
-                <Text variant="caption" color="tertiary">
-                  {item.item_count ?? 0} tracks
-                </Text>
-              </Card>
+              <ListCard list={item} />
             </Pressable>
           )}
         />
@@ -121,11 +136,47 @@ export default function ListsScreen() {
         visible={showCreate}
         onClose={() => setShowCreate(false)}
         onCreated={(newList) => {
-          setLists((prev) => [newList, ...prev]);
+          setLists((prev) => [{ ...newList, itemCount: 0, coverUrl: null }, ...prev]);
           setShowCreate(false);
         }}
       />
     </SafeAreaView>
+  );
+}
+
+function ListCard({ list }: { list: List }) {
+  const { colors } = useTheme();
+  return (
+    <View style={[styles.listCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+      {/* Cover thumbnail */}
+      <View style={[styles.coverThumb, { backgroundColor: colors.surfaceElevated }]}>
+        {list.coverUrl ? (
+          <Image source={{ uri: list.coverUrl }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+        ) : (
+          <Text style={{ fontSize: 16, color: colors.textTertiary }}>≡</Text>
+        )}
+      </View>
+
+      {/* Text content */}
+      <View style={{ flex: 1, gap: 2 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing[2] }}>
+          <Text variant="title" style={{ flex: 1 }} numberOfLines={1}>
+            {list.title}
+          </Text>
+          {list.is_public && <Badge label="Public" variant="neutral" />}
+        </View>
+        {list.description ? (
+          <Text variant="caption" color="secondary" numberOfLines={1}>
+            {list.description}
+          </Text>
+        ) : null}
+        <Text variant="caption" color="tertiary">
+          {list.itemCount} {list.itemCount === 1 ? 'track' : 'tracks'}
+        </Text>
+      </View>
+
+      <Text style={{ fontSize: 16, color: colors.textTertiary }}>›</Text>
+    </View>
   );
 }
 
@@ -136,7 +187,7 @@ function CreateListModal({
 }: {
   visible: boolean;
   onClose: () => void;
-  onCreated: (list: List) => void;
+  onCreated: (list: Omit<List, 'itemCount' | 'coverUrl'>) => void;
 }) {
   const { colors } = useTheme();
   const [title, setTitle] = useState('');
@@ -166,7 +217,12 @@ function CreateListModal({
 
     setLoading(false);
     if (insertError) { setError(insertError.message); return; }
-    if (data) onCreated(data);
+    if (data) {
+      setTitle('');
+      setDescription('');
+      setIsPublic(false);
+      onCreated(data);
+    }
   }
 
   return (
@@ -281,11 +337,24 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     padding: spacing[8],
   },
-  listItemHeader: {
+
+  listCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing[2],
+    gap: spacing[3],
+    padding: spacing[4],
+    borderRadius: radii.lg,
+    borderWidth: 1,
   },
+  coverThumb: {
+    width: 52,
+    height: 52,
+    borderRadius: radii.md,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
   // Modal
   modalRoot: { flex: 1, padding: spacing[5] },
   modalHeader: {

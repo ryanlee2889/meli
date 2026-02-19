@@ -12,9 +12,10 @@ function TabBar({ state, descriptors, navigation }: BottomTabBarProps) {
   const insets = useSafeAreaInsets();
 
   const icons: Record<string, string> = {
+    profile: '○',
     discover: '◈',
     lists: '≡',
-    profile: '○',
+    daily: '✦',
   };
 
   return (
@@ -81,9 +82,10 @@ export default function TabsLayout() {
         headerShown: false,
       }}
     >
+      <Tabs.Screen name="profile" options={{ title: 'Profile' }} />
       <Tabs.Screen name="discover" options={{ title: 'Discover' }} />
       <Tabs.Screen name="lists" options={{ title: 'Lists' }} />
-      <Tabs.Screen name="profile" options={{ title: 'Profile' }} />
+      <Tabs.Screen name="daily" options={{ title: 'Daily' }} />
     </Tabs>
   );
 }

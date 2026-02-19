@@ -41,6 +41,7 @@ export type Rating = {
   score: number;
   tags: string[] | null;
   created_at: string;
+  updated_at: string;
 };
 
 export type Item = {

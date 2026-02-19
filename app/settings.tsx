@@ -11,7 +11,8 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { spacing, radii } from '@/theme';
 import { supabase } from '@/lib/supabase';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { clearSpotifyToken, getStoredSpotifyToken } from '@/lib/spotify';
 
 type SettingRowProps = {
   label: string;
@@ -77,6 +78,13 @@ export default function SettingsScreen() {
   const { colors, mode, setMode } = useTheme();
   const [privateProfile, setPrivateProfile] = useState(false);
   const [spotifyConnected, setSpotifyConnected] = useState(false);
+
+  useEffect(() => {
+    // Load real Spotify connection status
+    getStoredSpotifyToken().then((token) => {
+      setSpotifyConnected(!!token);
+    });
+  }, []);
 
   async function handleSignOut() {
     Alert.alert('Sign out', 'Are you sure you want to sign out?', [
@@ -146,7 +154,18 @@ export default function SettingsScreen() {
                   'Your Spotify tokens will be deleted. Ratings stay.',
                   [
                     { text: 'Cancel', style: 'cancel' },
-                    { text: 'Disconnect', style: 'destructive', onPress: () => setSpotifyConnected(false) },
+                    {
+                      text: 'Disconnect',
+                      style: 'destructive',
+                      onPress: async () => {
+                        await clearSpotifyToken();
+                        const { data: { user } } = await supabase.auth.getUser();
+                        if (user) {
+                          await supabase.from('profiles').update({ spotify_connected: false }).eq('id', user.id);
+                        }
+                        setSpotifyConnected(false);
+                      },
+                    },
                   ]
                 );
               }}

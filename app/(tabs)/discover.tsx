@@ -1,7 +1,7 @@
 /**
  * Discover — swipe/rate flow.
- * Fetches a batch of tracks, renders SwipeCard deck,
- * shows RatingControl then optional "Add to list" after rating.
+ * Loads tracks from Spotify (top tracks + recommendations) if connected,
+ * falls back to mock data otherwise.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -11,6 +11,7 @@ import {
   Pressable,
   ActivityIndicator,
   FlatList,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -21,51 +22,47 @@ import { SwipeCard, type Track } from '@/components/SwipeCard';
 import { RatingControl } from '@/components/RatingControl';
 import { spacing, radii } from '@/theme';
 import { supabase } from '@/lib/supabase';
+import {
+  getStoredSpotifyToken,
+  fetchTopTracks,
+  fetchTopArtistIds,
+  fetchRecommendations,
+} from '@/lib/spotify';
 
 const { width, height } = Dimensions.get('window');
 const VISIBLE_CARDS = 3;
 
-const MOCK_TRACKS: Track[] = [
-  {
-    id: '1',
-    name: 'LOVE.',
-    artists: ['Kendrick Lamar'],
-    albumName: 'DAMN.',
-    imageUrl: 'https://i.scdn.co/image/ab67616d0000b2731f609a9db1a2b01e16b99de6',
-    spotifyId: '6PGoSes0D9eUDeeAafB2As',
-  },
-  {
-    id: '2',
-    name: 'Nights',
-    artists: ['Frank Ocean'],
-    albumName: 'Blonde',
-    imageUrl: 'https://i.scdn.co/image/ab67616d0000b273c5649add07ed3720be9d5526',
-    spotifyId: '7eqoqGkKwgOaWNNHx90uEZ',
-  },
-  {
-    id: '3',
-    name: 'Pyramids',
-    artists: ['Frank Ocean'],
-    albumName: 'Channel Orange',
-    imageUrl: 'https://i.scdn.co/image/ab67616d0000b2732fb3db3a9fe3a7f9ce58e1a2',
-    spotifyId: '6U8NlOHMqtFCFpkrJjOBYo',
-  },
-  {
-    id: '4',
-    name: 'New Magic Wand',
-    artists: ['Tyler, the Creator'],
-    albumName: 'IGOR',
-    imageUrl: 'https://i.scdn.co/image/ab67616d0000b27349a6d4df3b46a7e8a4af1b3e',
-    spotifyId: '2FkN1KiHDU8XPBCHbR16fR',
-  },
-  {
-    id: '5',
-    name: 'Motion Picture Soundtrack',
-    artists: ['Radiohead'],
-    albumName: 'Kid A',
-    imageUrl: 'https://i.scdn.co/image/ab67616d0000b273de3c04b5be6f86d3bede5e5c',
-    spotifyId: '4HUkISmicNHqNaHh16SXKL',
-  },
+function shuffle<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// Fallback tracks used when Spotify isn't connected — shuffled each load
+const FALLBACK_TRACKS: Track[] = [
+  { id: '1',  name: 'LOVE.',                    artists: ['Kendrick Lamar'],        albumName: 'DAMN.',           imageUrl: 'https://i.scdn.co/image/ab67616d0000b2731f609a9db1a2b01e16b99de6', spotifyId: '6PGoSes0D9eUDeeAafB2As' },
+  { id: '2',  name: 'Nights',                   artists: ['Frank Ocean'],            albumName: 'Blonde',          imageUrl: 'https://i.scdn.co/image/ab67616d0000b273c5649add07ed3720be9d5526', spotifyId: '7eqoqGkKwgOaWNNHx90uEZ' },
+  { id: '3',  name: 'Pyramids',                 artists: ['Frank Ocean'],            albumName: 'Channel Orange',  imageUrl: 'https://i.scdn.co/image/ab67616d0000b2732fb3db3a9fe3a7f9ce58e1a2', spotifyId: '6U8NlOHMqtFCFpkrJjOBYo' },
+  { id: '4',  name: 'New Magic Wand',           artists: ['Tyler, the Creator'],     albumName: 'IGOR',            imageUrl: 'https://i.scdn.co/image/ab67616d0000b27349a6d4df3b46a7e8a4af1b3e', spotifyId: '2FkN1KiHDU8XPBCHbR16fR' },
+  { id: '5',  name: 'Motion Picture Soundtrack',artists: ['Radiohead'],              albumName: 'Kid A',           imageUrl: 'https://i.scdn.co/image/ab67616d0000b273de3c04b5be6f86d3bede5e5c', spotifyId: '4HUkISmicNHqNaHh16SXKL' },
+  { id: '6',  name: 'Self Control',             artists: ['Frank Ocean'],            albumName: 'Blonde',          imageUrl: 'https://i.scdn.co/image/ab67616d0000b273c5649add07ed3720be9d5526', spotifyId: '7LESsgx6COXN43WWEMivGm' },
+  { id: '7',  name: 'All The Stars',            artists: ['Kendrick Lamar', 'SZA'], albumName: 'Black Panther',   imageUrl: 'https://i.scdn.co/image/ab67616d0000b273b2d5b8e5bfcdbf1c4c5e8f7e', spotifyId: '6rqqwtrorwMkBPKjMuD6yv' },
+  { id: '8',  name: 'The Less I Know The Better',artists: ['Tame Impala'],          albumName: 'Currents',        imageUrl: 'https://i.scdn.co/image/ab67616d0000b2739e1cfc756886ac782e363d2e', spotifyId: '6K4t31amVTZDgR3sKmwUJJ' },
+  { id: '9',  name: 'When I Get Home',          artists: ['SZA'],                    albumName: 'SOS',             imageUrl: 'https://i.scdn.co/image/ab67616d0000b273e346d2b3e18db3e2ecd6ea9f', spotifyId: '0NMoNWynm9F6TYVXVFCMS0' },
+  { id: '10', name: 'R.A.P. Music',             artists: ['Killer Mike'],            albumName: 'R.A.P. Music',    imageUrl: 'https://i.scdn.co/image/ab67616d0000b2737c6f60e18de1fb1d2b66e3eb', spotifyId: '7hQJA50XrCWABAu5v6QZ4i' },
+  { id: '11', name: 'Peaches',                  artists: ['Justin Bieber'],          albumName: 'Justice',         imageUrl: 'https://i.scdn.co/image/ab67616d0000b273e6f407c7f3a0ec98845e4431', spotifyId: '4iZ4pt7kvcaH6Yo8UoZ4s2' },
+  { id: '12', name: 'good 4 u',                 artists: ['Olivia Rodrigo'],         albumName: 'SOUR',            imageUrl: 'https://i.scdn.co/image/ab67616d0000b273a91c10fe9472d9bd89802e5a', spotifyId: '4ZtFanR9U6ndgddUvNcjcG' },
+  { id: '13', name: 'Blinding Lights',          artists: ['The Weeknd'],             albumName: 'After Hours',     imageUrl: 'https://i.scdn.co/image/ab67616d0000b2738863bc11d2aa12b54f5aeb36', spotifyId: '0VjIjW4GlUZAMYd2vXMi3b' },
+  { id: '14', name: 'drivers license',          artists: ['Olivia Rodrigo'],         albumName: 'SOUR',            imageUrl: 'https://i.scdn.co/image/ab67616d0000b273a91c10fe9472d9bd89802e5a', spotifyId: '5wANPM4fQCJwkW0ne1F0VQ' },
+  { id: '15', name: 'Ghost Town',               artists: ['Kanye West'],             albumName: 'ye',              imageUrl: 'https://i.scdn.co/image/ab67616d0000b273ac5f1a49a4cde2e96c15b5d1', spotifyId: '0OHNnSRPR5IFI6KVnrZUFf' },
+  { id: '16', name: 'Moon',                     artists: ['Kanye West'],             albumName: 'Donda',           imageUrl: 'https://i.scdn.co/image/ab67616d0000b2737aa3d8f8f84c4c2e3f00a7d8', spotifyId: '6MIqnFJBfEdF0P03JO6b8N' },
+  { id: '17', name: 'Phoebe Bridgers',          artists: ['Funeral'],               albumName: 'Punisher',        imageUrl: 'https://i.scdn.co/image/ab67616d0000b273a3d36ef6a04e70ff48f36b44', spotifyId: '1RXFFMtRLPRgZs3thTfFoX' },
+  { id: '18', name: 'Motion',                   artists: ['Bryson Tiller'],          albumName: 'TRAPSOUL',        imageUrl: 'https://i.scdn.co/image/ab67616d0000b27379538be1b7bd6a3cef8ee26f', spotifyId: '1AHO8Tkuk9D2N56vTQ8wgx' },
+  { id: '19', name: 'Murder on My Mind',        artists: ['YNW Melly'],             albumName: 'I Am You',        imageUrl: 'https://i.scdn.co/image/ab67616d0000b273b6cb3dff47ed9617f9e70d77', spotifyId: '4SqWfbHDCbF3H0h1PnboBT' },
+  { id: '20', name: 'Apocalypse Dreams',        artists: ['Tame Impala'],            albumName: 'Lonerism',        imageUrl: 'https://i.scdn.co/image/ab67616d0000b273ad91e7e46a80a6def4a5a02a', spotifyId: '5M2dJJMEzLCM2TSuNKCzV7' },
 ];
 
 type RatedTrack = {
@@ -80,18 +77,97 @@ type UserList = {
 };
 
 export default function DiscoverScreen() {
-  const { colors, isDark } = useTheme();
-  const [tracks, setTracks] = useState<Track[]>(MOCK_TRACKS);
+  const { colors } = useTheme();
+  const [tracks, setTracks] = useState<Track[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
   const [pendingRating, setPendingRating] = useState<Track | null>(null);
   const [ratedTrack, setRatedTrack] = useState<RatedTrack | null>(null);
   const [userLists, setUserLists] = useState<UserList[]>([]);
   const [listsLoading, setListsLoading] = useState(false);
   const [addingToList, setAddingToList] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [usingSpotify, setUsingSpotify] = useState(false);
 
   const currentTrack = tracks[currentIndex] ?? null;
   const visibleTracks = tracks.slice(currentIndex, currentIndex + VISIBLE_CARDS);
+
+  useEffect(() => {
+    loadTracks();
+  }, []);
+
+  async function loadTracks() {
+    setLoading(true);
+    try {
+      const token = await getStoredSpotifyToken();
+
+      if (!token) {
+        setTracks(shuffle(FALLBACK_TRACKS));
+        setUsingSpotify(false);
+        setLoading(false);
+        return;
+      }
+
+      // Get IDs of tracks the user has already rated
+      const { data: { user } } = await supabase.auth.getUser();
+      let ratedSpotifyIds = new Set<string>();
+
+      if (user) {
+        const { data: ratedItems } = await supabase
+          .from('ratings')
+          .select('items(spotify_id)')
+          .eq('user_id', user.id);
+
+        for (const r of ratedItems ?? []) {
+          const sid = (r.items as any)?.spotify_id;
+          if (sid) ratedSpotifyIds.add(sid);
+        }
+      }
+
+      // Fetch top tracks + recommendations in parallel
+      const [topTracks, topArtistIds] = await Promise.all([
+        fetchTopTracks(token, 50),
+        fetchTopArtistIds(token, 5),
+      ]);
+
+      const recs = topArtistIds.length > 0
+        ? await fetchRecommendations(token, topArtistIds, 30)
+        : [];
+
+      // Merge, dedupe, filter already-rated + tracks with no artwork
+      const seen = new Set<string>();
+      const allTracks: Track[] = [];
+
+      for (const t of [...topTracks, ...recs]) {
+        if (!seen.has(t.id) && !ratedSpotifyIds.has(t.id) && t.imageUrl) {
+          seen.add(t.id);
+          allTracks.push({
+            id: t.id,
+            name: t.name,
+            artists: t.artists,
+            albumName: t.albumName,
+            imageUrl: t.imageUrl,
+            spotifyId: t.id,
+          });
+        }
+      }
+
+      if (allTracks.length > 0) {
+        setTracks(shuffle(allTracks));
+        setUsingSpotify(true);
+      } else {
+        // Token valid but no unrated tracks left
+        setTracks([]);
+        setUsingSpotify(true);
+      }
+    } catch (e) {
+      console.error('Failed to load tracks', e);
+      setTracks(shuffle(FALLBACK_TRACKS));
+      setUsingSpotify(false);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   // Load user lists when the add-to-list step becomes visible
   useEffect(() => {
@@ -129,7 +205,7 @@ export default function DiscoverScreen() {
     if (!user) { dismissSheet(); return; }
 
     // 1. Upsert track into items cache
-    const { data: itemData } = await supabase
+    const { data: itemData, error: itemError } = await supabase
       .from('items')
       .upsert({
         spotify_id: pendingRating.spotifyId,
@@ -143,14 +219,26 @@ export default function DiscoverScreen() {
       .select('id')
       .single();
 
-    if (!itemData) { dismissSheet(); return; }
+    if (itemError || !itemData) {
+      console.error('Failed to save track to items:', itemError?.message);
+      Alert.alert('Save failed', 'Could not save this track. Please try again.');
+      dismissSheet();
+      return;
+    }
 
     // 2. Upsert rating
-    await supabase.from('ratings').upsert({
+    const { error: ratingError } = await supabase.from('ratings').upsert({
       user_id: user.id,
       item_id: itemData.id,
       score,
     }, { onConflict: 'user_id,item_id' });
+
+    if (ratingError) {
+      console.error('Failed to save rating:', ratingError.message);
+      Alert.alert('Save failed', 'Could not save your rating. Please try again.');
+      dismissSheet();
+      return;
+    }
 
     // 3. Transition to "add to list" step
     setPendingRating(null);
@@ -174,6 +262,13 @@ export default function DiscoverScreen() {
     dismissSheet();
   }
 
+  async function handleRefresh() {
+    setRefreshing(true);
+    setCurrentIndex(0);
+    await loadTracks();
+    setRefreshing(false);
+  }
+
   function dismissSheet() {
     setPendingRating(null);
     setRatedTrack(null);
@@ -186,6 +281,9 @@ export default function DiscoverScreen() {
     return (
       <View style={[styles.root, { backgroundColor: colors.bg, justifyContent: 'center', alignItems: 'center' }]}>
         <ActivityIndicator color={colors.accent} />
+        <Text variant="caption" color="secondary" style={{ marginTop: spacing[3] }}>
+          Loading your tracks…
+        </Text>
       </View>
     );
   }
@@ -195,9 +293,16 @@ export default function DiscoverScreen() {
       <SafeAreaView style={{ flex: 1 }} edges={['top']}>
         {/* Header */}
         <View style={styles.header}>
-          <Text style={{ fontSize: 22, fontWeight: '800', color: colors.text, letterSpacing: -0.5 }}>
-            Discover
-          </Text>
+          <View>
+            <Text style={{ fontSize: 22, fontWeight: '800', color: colors.text, letterSpacing: -0.5 }}>
+              Discover
+            </Text>
+            {usingSpotify && (
+              <Text style={{ fontSize: 11, color: colors.textTertiary, marginTop: 1 }}>
+                from your Spotify
+              </Text>
+            )}
+          </View>
           <Pressable onPress={() => router.push('/settings')}>
             <Text style={{ fontSize: 20, color: colors.textSecondary }}>⚙</Text>
           </Pressable>
@@ -224,11 +329,30 @@ export default function DiscoverScreen() {
           <View style={styles.emptyState}>
             <Text style={{ fontSize: 40, textAlign: 'center' }}>◈</Text>
             <Text variant="h3" align="center" style={{ marginTop: spacing[3] }}>
-              You're all caught up
+              {usingSpotify ? "You're all caught up" : 'Demo tracks'}
             </Text>
             <Text variant="body" color="secondary" align="center" style={{ marginTop: spacing[2] }}>
-              Check back later for more tracks.
+              {usingSpotify
+                ? "You've rated everything we found. Refresh for a new batch."
+                : 'Connect Spotify in Settings for a personalised feed.'}
             </Text>
+            <View style={{ marginTop: spacing[5], gap: spacing[3], alignItems: 'center' }}>
+              <Button
+                label={refreshing ? 'Loading…' : 'Shuffle again'}
+                variant="primary"
+                size="md"
+                loading={refreshing}
+                onPress={handleRefresh}
+              />
+              {!usingSpotify && (
+                <Button
+                  label="Connect Spotify"
+                  variant="secondary"
+                  size="md"
+                  onPress={() => router.push('/settings')}
+                />
+              )}
+            </View>
           </View>
         )}
 
@@ -312,14 +436,15 @@ export default function DiscoverScreen() {
                   />
                 )}
 
-                <Button
-                  label="Done"
-                  variant="ghost"
-                  size="md"
-                  fullWidth
-                  onPress={dismissSheet}
-                  style={{ marginTop: spacing[3] }}
-                />
+                <View style={{ marginTop: spacing[3] }}>
+                  <Button
+                    label="Done"
+                    variant="ghost"
+                    size="md"
+                    fullWidth
+                    onPress={dismissSheet}
+                  />
+                </View>
               </View>
             )}
           </View>

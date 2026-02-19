@@ -1,13 +1,15 @@
 /**
  * Onboarding — Connect Spotify or pick seed artists.
  * One-time flow after waitlist is cleared.
+ *
+ * Spotify auth uses PKCE so no client secret is ever on device.
  */
-import { useState } from 'react';
-import { View, StyleSheet, Pressable, ScrollView } from 'react-native';
+import { useEffect, useState } from 'react';
+import { View, StyleSheet, Pressable, ScrollView, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
-import * as WebBrowser from 'expo-web-browser';
 import * as AuthSession from 'expo-auth-session';
+import * as SecureStore from 'expo-secure-store';
 import Constants from 'expo-constants';
 import { useTheme } from '@/hooks/useTheme';
 import { Text } from '@/components/ui/Text';
@@ -15,8 +17,8 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { spacing, radii } from '@/theme';
-
-WebBrowser.maybeCompleteAuthSession();
+import { supabase } from '@/lib/supabase';
+import { storeSpotifyToken, PKCE_VERIFIER_KEY } from '@/lib/spotify';
 
 const SEED_ARTISTS = [
   'Kendrick Lamar', 'Frank Ocean', 'Radiohead', 'Beyoncé',
@@ -25,31 +27,100 @@ const SEED_ARTISTS = [
   'Phoebe Bridgers', 'The Weeknd', 'Billie Eilish', 'JPEGMAFIA',
 ];
 
+const SPOTIFY_DISCOVERY = {
+  authorizationEndpoint: 'https://accounts.spotify.com/authorize',
+  tokenEndpoint: 'https://accounts.spotify.com/api/token',
+};
+
 export default function OnboardingScreen() {
   const { colors } = useTheme();
   const [selectedArtists, setSelectedArtists] = useState<string[]>([]);
   const [spotifyConnecting, setSpotifyConnecting] = useState(false);
+  const [spotifyError, setSpotifyError] = useState<string | null>(null);
 
   const spotifyClientId = Constants.expoConfig?.extra?.spotifyClientId as string;
-  const redirectUri = AuthSession.makeRedirectUri({ scheme: 'vibecheck', path: 'spotify-callback' });
+
+  // Triple-slash form so Expo Router maps it to app/spotify-callback.tsx
+  const redirectUri = 'vibecheck:///spotify-callback';
+
+  // PKCE auth request — no client secret needed on device
+  const [request, response, promptAsync] = AuthSession.useAuthRequest(
+    {
+      clientId: spotifyClientId,
+      scopes: ['user-top-read', 'user-read-recently-played', 'user-library-read'],
+      usePKCE: true,
+      redirectUri,
+    },
+    SPOTIFY_DISCOVERY
+  );
+
+  // Persist the PKCE code verifier so spotify-callback.tsx can complete the
+  // exchange even if this screen is unmounted when the redirect fires.
+  useEffect(() => {
+    if (request?.codeVerifier) {
+      SecureStore.setItemAsync(PKCE_VERIFIER_KEY, request.codeVerifier).catch(() => null);
+    }
+  }, [request?.codeVerifier]);
+
+  // Handle auth response — fires when ASWebAuthenticationSession intercepts
+  // the redirect before Expo Router does (the common iOS case).
+  useEffect(() => {
+    if (!response) return;
+
+    if (response.type === 'success') {
+      const { code } = response.params;
+      if (code && request?.codeVerifier) {
+        exchangeCodeForToken(code, request.codeVerifier);
+      } else {
+        setSpotifyError('Auth response missing code. Please try again.');
+        setSpotifyConnecting(false);
+      }
+    } else if (response.type === 'error') {
+      setSpotifyError(response.error?.message ?? 'Spotify auth failed. Please try again.');
+      setSpotifyConnecting(false);
+    } else if (response.type === 'dismiss' || response.type === 'cancel') {
+      setSpotifyConnecting(false);
+    }
+  }, [response]);
+
+  async function exchangeCodeForToken(code: string, codeVerifier: string) {
+    try {
+      const tokenRes = await AuthSession.exchangeCodeAsync(
+        {
+          clientId: spotifyClientId,
+          code,
+          redirectUri,
+          extraParams: { code_verifier: codeVerifier },
+        },
+        SPOTIFY_DISCOVERY
+      );
+
+      await storeSpotifyToken(tokenRes.accessToken, tokenRes.expiresIn ?? 3600, tokenRes.refreshToken);
+      // Clean up verifier so the root layout handler doesn't double-exchange
+      await SecureStore.deleteItemAsync(PKCE_VERIFIER_KEY).catch(() => null);
+
+      // Mark Spotify as connected in the user profile
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        await supabase
+          .from('profiles')
+          .update({ spotify_connected: true })
+          .eq('id', user.id);
+      }
+
+      router.replace('/(tabs)/profile');
+    } catch (e: any) {
+      console.error('Spotify token exchange failed', e);
+      setSpotifyError('Could not complete Spotify login. Please try again.');
+      setSpotifyConnecting(false);
+    }
+  }
 
   async function connectSpotify() {
+    setSpotifyError(null);
     setSpotifyConnecting(true);
-    const state = Math.random().toString(36).substring(2);
-
-    const authUrl =
-      `https://accounts.spotify.com/authorize?` +
-      new URLSearchParams({
-        client_id: spotifyClientId,
-        response_type: 'code',
-        redirect_uri: redirectUri,
-        scope: 'user-top-read user-read-recently-played user-library-read',
-        state,
-      }).toString();
-
-    // Opens in system browser; deep link vibecheck://spotify-callback handles the return
-    await WebBrowser.openBrowserAsync(authUrl);
-    setSpotifyConnecting(false);
+    await promptAsync();
+    // spotifyConnecting will be cleared in the response useEffect
   }
 
   function toggleArtist(artist: string) {
@@ -59,8 +130,7 @@ export default function OnboardingScreen() {
   }
 
   function handleContinue() {
-    // Save seed artists if any, then push to tabs
-    router.replace('/(tabs)/discover');
+    router.replace('/(tabs)/profile');
   }
 
   return (
@@ -88,7 +158,6 @@ export default function OnboardingScreen() {
         {/* Spotify card */}
         <Card gap={spacing[4]}>
           <View style={styles.spotifyHeader}>
-            {/* Spotify-coloured dot */}
             <View style={[styles.spotifyDot, { backgroundColor: '#1DB954' }]} />
             <View style={{ flex: 1 }}>
               <Text variant="title">Connect Spotify</Text>
@@ -99,11 +168,18 @@ export default function OnboardingScreen() {
             <Badge label="Recommended" variant="accent" />
           </View>
 
+          {spotifyError && (
+            <Text variant="caption" color="negative">
+              {spotifyError}
+            </Text>
+          )}
+
           <Button
-            label={spotifyConnecting ? 'Opening…' : 'Connect Spotify'}
+            label={spotifyConnecting ? 'Connecting…' : 'Connect Spotify'}
             variant="primary"
             fullWidth
             loading={spotifyConnecting}
+            disabled={!spotifyClientId || spotifyConnecting}
             onPress={connectSpotify}
           />
         </Card>
@@ -153,14 +229,15 @@ export default function OnboardingScreen() {
         </View>
 
         {/* Continue */}
-        <Button
-          label={selectedArtists.length > 0 ? `Continue with ${selectedArtists.length} artists` : 'Skip for now'}
-          variant={selectedArtists.length > 0 ? 'primary' : 'secondary'}
-          size="lg"
-          fullWidth
-          onPress={handleContinue}
-          style={{ marginTop: spacing[2] }}
-        />
+        <View style={{ marginTop: spacing[2] }}>
+          <Button
+            label={selectedArtists.length > 0 ? `Continue with ${selectedArtists.length} artists` : 'Skip for now'}
+            variant={selectedArtists.length > 0 ? 'primary' : 'secondary'}
+            size="lg"
+            fullWidth
+            onPress={handleContinue}
+          />
+        </View>
       </ScrollView>
     </SafeAreaView>
   );
