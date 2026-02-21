@@ -5,6 +5,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StyleSheet } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
+import * as Linking from 'expo-linking';
 import { ThemeProvider, useThemeContext } from '@/providers/ThemeProvider';
 import { supabase } from '@/lib/supabase';
 import type { Session } from '@supabase/supabase-js';
@@ -47,6 +48,22 @@ function RootLayoutInner() {
   // Handles Spotify callback URLs that iOS routes as deep links instead of
   // letting ASWebAuthenticationSession intercept them.
   useSpotifyCallbackHandler();
+
+  // Handle email verification deep links (vibecheck://?code=...)
+  useEffect(() => {
+    const handleAuthUrl = async (url: string) => {
+      if (!url.startsWith('vibecheck://')) return;
+      try {
+        await supabase.auth.exchangeCodeForSession(url);
+      } catch {
+        // Not an auth code URL — ignore (e.g. invite deep links)
+      }
+    };
+
+    Linking.getInitialURL().then(url => { if (url) handleAuthUrl(url); });
+    const sub = Linking.addEventListener('url', ({ url }) => handleAuthUrl(url));
+    return () => sub.remove();
+  }, []);
 
   useEffect(() => {
     // onAuthStateChange fires immediately with INITIAL_SESSION,

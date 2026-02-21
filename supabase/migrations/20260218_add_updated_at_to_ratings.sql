@@ -6,8 +6,12 @@
 ALTER TABLE ratings
   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
 
+-- moddatetime lives in the pg_moddatetime extension (available on Supabase).
+CREATE EXTENSION IF NOT EXISTS moddatetime SCHEMA extensions;
+
 -- Keep it current on every update (mirrors the pattern used on other tables).
-CREATE OR REPLACE TRIGGER set_ratings_updated_at
+DROP TRIGGER IF EXISTS set_ratings_updated_at ON ratings;
+CREATE TRIGGER set_ratings_updated_at
   BEFORE UPDATE ON ratings
   FOR EACH ROW
-  EXECUTE PROCEDURE moddatetime(updated_at);
+  EXECUTE PROCEDURE extensions.moddatetime(updated_at);

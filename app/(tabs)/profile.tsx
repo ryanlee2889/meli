@@ -13,17 +13,18 @@ import {
   Pressable,
   Dimensions,
   Share,
-  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useTheme } from '@/hooks/useTheme';
+import { Skeleton } from '@/components/ui/Skeleton';
 import { Text } from '@/components/ui/Text';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { spacing, radii } from '@/theme';
 import { supabase, type Profile } from '@/lib/supabase';
 import { getDailyStatus, type DailyStatus } from '@/lib/dailyApi';
+import { useNextQueueCountdown } from '@/hooks/useNextQueueCountdown';
 import type { ColorScheme } from '@/theme/colors';
 
 const { width } = Dimensions.get('window');
@@ -41,7 +42,19 @@ type ArtistCell = {
   imageUrl?: string;
 };
 
+// Bayesian average: pulls low-confidence entries toward the user's personal mean.
+// M=3 means you need ~3 tracks before your score is taken at face value.
+const BAYES_M = 3;
+
+function bayesianScore(count: number, total: number, globalAvg: number): number {
+  return (total + BAYES_M * globalAvg) / (count + BAYES_M);
+}
+
 function computeTopArtists(ratings: any[]): ArtistCell[] {
+  const globalAvg = ratings.length > 0
+    ? ratings.reduce((s, r) => s + r.score, 0) / ratings.length
+    : 6.5;
+
   const map: Record<string, { count: number; total: number; imageUrl?: string }> = {};
   for (const r of ratings) {
     const artists: string[] = Array.isArray(r.items?.artists_json)
@@ -58,8 +71,64 @@ function computeTopArtists(ratings: any[]): ArtistCell[] {
   }
   return Object.entries(map)
     .map(([name, d]) => ({ name, count: d.count, avgScore: d.total / d.count, imageUrl: d.imageUrl }))
-    .sort((a, b) => b.count - a.count || b.avgScore - a.avgScore)
+    .sort((a, b) =>
+      bayesianScore(b.count, b.count * b.avgScore, globalAvg) -
+      bayesianScore(a.count, a.count * a.avgScore, globalAvg)
+    )
     .slice(0, 7);
+}
+
+type GenreCell = {
+  genre: string;   // raw key (lowercase)
+  name: string;    // display name (title-cased)
+  count: number;
+  avgScore: number;
+  imageUrl?: string;
+};
+
+function toTitleCase(s: string) {
+  return s.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function computeTopGenres(ratings: any[]): GenreCell[] {
+  const globalAvg = ratings.length > 0
+    ? ratings.reduce((s, r) => s + r.score, 0) / ratings.length
+    : 6.5;
+
+  const map: Record<string, { count: number; total: number; imageUrl?: string }> = {};
+  for (const r of ratings) {
+    const genres: string[] = Array.isArray(r.items?.genres_json) ? r.items.genres_json : [];
+    for (const genre of genres) {
+      if (!map[genre]) map[genre] = { count: 0, total: 0 };
+      map[genre].count++;
+      map[genre].total += r.score;
+      if (!map[genre].imageUrl && r.items?.image_url) {
+        map[genre].imageUrl = r.items.image_url;
+      }
+    }
+  }
+  return Object.entries(map)
+    .map(([genre, d]) => ({
+      genre,
+      name: toTitleCase(genre),
+      count: d.count,
+      avgScore: d.total / d.count,
+      imageUrl: d.imageUrl,
+    }))
+    .sort((a, b) =>
+      bayesianScore(b.count, b.count * b.avgScore, globalAvg) -
+      bayesianScore(a.count, a.count * a.avgScore, globalAvg)
+    )
+    .slice(0, 10);
+}
+
+function getGenreTracks(ratings: any[], genre: string) {
+  return ratings
+    .filter((r) => {
+      const genres: string[] = Array.isArray(r.items?.genres_json) ? r.items.genres_json : [];
+      return genres.includes(genre);
+    })
+    .sort((a, b) => b.score - a.score);
 }
 
 function computeDistribution(ratings: any[]) {
@@ -105,7 +174,10 @@ export default function ProfileScreen() {
   const [lists, setLists] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedArtist, setSelectedArtist] = useState<{ artist: ArtistCell; rank: number } | null>(null);
+  const [showAllRatings, setShowAllRatings] = useState(false);
   const [dailyStatus, setDailyStatus] = useState<DailyStatus>({ state: 'none' });
+  const [tasteView, setTasteView] = useState<'artists' | 'genres'>('artists');
+  const [selectedGenre, setSelectedGenre] = useState<{ genre: GenreCell; rank: number } | null>(null);
 
   useFocusEffect(
     useCallback(() => {
@@ -137,6 +209,7 @@ export default function ProfileScreen() {
 
     // Load daily status in the background (non-blocking)
     getDailyStatus().then(setDailyStatus);
+
 
     setLoading(false);
   }
@@ -172,11 +245,7 @@ export default function ProfileScreen() {
   }
 
   if (loading) {
-    return (
-      <SafeAreaView style={[styles.root, { backgroundColor: colors.bg }]} edges={['top']}>
-        <ActivityIndicator color={colors.accent} style={{ flex: 1 }} />
-      </SafeAreaView>
-    );
+    return <ProfileSkeleton />;
   }
 
   return (
@@ -222,7 +291,7 @@ export default function ProfileScreen() {
 
         {/* ── Stats row ── */}
         <View style={[styles.statsRow, { borderColor: colors.border }]}>
-          <StatCell label="Ratings" value={String(totalRatings)} />
+          <StatCell label="Ratings" value={String(totalRatings)} onPress={totalRatings > 0 ? () => setShowAllRatings(true) : undefined} />
           <View style={[styles.statDivider, { backgroundColor: colors.border }]} />
           <StatCell
             label="Avg score"
@@ -241,10 +310,35 @@ export default function ProfileScreen() {
           {/* ── Taste Map ── */}
           {topArtists.length > 0 && (
             <Section title="Taste Map">
-              <TasteMap
-                artists={topArtists}
-                onArtistPress={(artist, rank) => setSelectedArtist({ artist, rank })}
-              />
+              {/* View toggle pills */}
+              <View style={{ flexDirection: 'row', gap: spacing[2] }}>
+                {(['artists', 'genres'] as const).map((v) => (
+                  <Pressable
+                    key={v}
+                    onPress={() => setTasteView(v)}
+                    style={[
+                      styles.tasteTogglePill,
+                      { backgroundColor: tasteView === v ? colors.accent : colors.surfaceElevated },
+                    ]}
+                  >
+                    <Text style={{ fontSize: 12, fontWeight: '700', color: tasteView === v ? '#080808' : colors.textSecondary }}>
+                      {v === 'artists' ? 'Artists' : 'Genres'}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              {tasteView === 'artists' ? (
+                <TasteMap
+                  artists={topArtists}
+                  onArtistPress={(artist, rank) => setSelectedArtist({ artist, rank })}
+                />
+              ) : (
+                <GenreMap
+                  genres={computeTopGenres(ratings)}
+                  onGenrePress={(genre, rank) => setSelectedGenre({ genre, rank })}
+                />
+              )}
             </Section>
           )}
 
@@ -356,6 +450,92 @@ export default function ProfileScreen() {
           onClose={() => setSelectedArtist(null)}
         />
       )}
+
+      {/* ── Genre sheet ── */}
+      {selectedGenre && (
+        <GenreSheet
+          genre={selectedGenre.genre}
+          rank={selectedGenre.rank}
+          tracks={getGenreTracks(ratings, selectedGenre.genre.genre)}
+          onClose={() => setSelectedGenre(null)}
+        />
+      )}
+
+      {/* ── All ratings sheet ── */}
+      {showAllRatings && (
+        <RatingsSheet
+          ratings={ratings}
+          avgScore={avgScore}
+          onClose={() => setShowAllRatings(false)}
+        />
+      )}
+    </SafeAreaView>
+  );
+}
+
+// ─── Skeleton ─────────────────────────────────────────────────────────────────
+
+function ProfileSkeleton() {
+  const { colors } = useTheme();
+  return (
+    <SafeAreaView style={[styles.root, { backgroundColor: colors.bg }]} edges={['top']}>
+      {/* Header */}
+      <View style={styles.header}>
+        <View style={{ gap: 6 }}>
+          <Skeleton width={150} height={22} />
+          <Skeleton width={80} height={13} />
+        </View>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing[3] }}>
+          <Skeleton width={56} height={22} borderRadius={radii.full} />
+          <Skeleton width={22} height={22} borderRadius={11} />
+          <Skeleton width={22} height={22} borderRadius={11} />
+        </View>
+      </View>
+
+      {/* Persona chip */}
+      <View style={styles.personaRow}>
+        <Skeleton width={120} height={27} borderRadius={radii.full} />
+      </View>
+
+      {/* Stats row */}
+      <View style={[styles.statsRow, { borderColor: colors.border }]}>
+        <View style={{ flex: 1, alignItems: 'center', gap: spacing[1] }}>
+          <Skeleton width={36} height={28} />
+          <Skeleton width={48} height={12} />
+        </View>
+        <View style={[styles.statDivider, { backgroundColor: colors.border }]} />
+        <View style={{ flex: 1, alignItems: 'center', gap: spacing[1] }}>
+          <Skeleton width={36} height={28} />
+          <Skeleton width={60} height={12} />
+        </View>
+        <View style={[styles.statDivider, { backgroundColor: colors.border }]} />
+        <View style={{ flex: 1, alignItems: 'center', gap: spacing[1] }}>
+          <Skeleton width={28} height={28} />
+          <Skeleton width={30} height={12} />
+        </View>
+      </View>
+
+      {/* Body */}
+      <View style={styles.body}>
+        {/* Vibe card */}
+        <Skeleton width="100%" height={68} borderRadius={radii.xl} />
+
+        {/* Taste Map */}
+        <View style={{ gap: spacing[3] }}>
+          <Skeleton width={72} height={12} />
+          <Skeleton width="100%" height={120} borderRadius={radii.lg} />
+          <View style={{ flexDirection: 'row', gap: spacing[2] }}>
+            <Skeleton width={HALF_W} height={90} borderRadius={radii.md} />
+            <Skeleton width={HALF_W} height={90} borderRadius={radii.md} />
+          </View>
+        </View>
+
+        {/* Distribution */}
+        <View style={{ gap: spacing[3] }}>
+          <Skeleton width={130} height={12} />
+          <Skeleton width="100%" height={96} borderRadius={radii.lg} />
+        </View>
+      </View>
     </SafeAreaView>
   );
 }
@@ -372,6 +552,7 @@ const MOOD_META: Record<string, { icon: string; color: string }> = {
 
 function TodayVibeCard({ status }: { status: DailyStatus }) {
   const { colors } = useTheme();
+  const countdown = useNextQueueCountdown();
 
   if (status.state === 'none') {
     return (
@@ -453,6 +634,9 @@ function TodayVibeCard({ status }: { status: DailyStatus }) {
             <Text variant="caption" color="secondary">View playlist</Text>
           )}
         </View>
+        <Text style={{ fontSize: 11, color: colors.textTertiary, marginTop: 2 }}>
+          Next queue in {countdown}
+        </Text>
       </View>
       <Text style={{ fontSize: 16, color: colors.textTertiary }}>›</Text>
     </Pressable>
@@ -468,16 +652,26 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function StatCell({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
+function StatCell({ label, value, highlight, onPress }: { label: string; value: string; highlight?: boolean; onPress?: () => void }) {
   const { colors } = useTheme();
-  return (
-    <View style={{ flex: 1, alignItems: 'center', gap: 2 }}>
+  const inner = (
+    <>
       <Text style={{ fontSize: 26, fontWeight: '800', color: highlight ? colors.accent : colors.text }}>
         {value}
       </Text>
-      <Text variant="caption" color="secondary">{label}</Text>
-    </View>
+      <Text variant="caption" color={onPress ? 'primary' : 'secondary'} style={onPress ? { textDecorationLine: 'underline' } : undefined}>
+        {label}
+      </Text>
+    </>
   );
+  if (onPress) {
+    return (
+      <Pressable onPress={onPress} style={({ pressed }) => ({ flex: 1, alignItems: 'center', gap: 2, opacity: pressed ? 0.6 : 1 })}>
+        {inner}
+      </Pressable>
+    );
+  }
+  return <View style={{ flex: 1, alignItems: 'center', gap: 2 }}>{inner}</View>;
 }
 
 function TasteMap({
@@ -674,6 +868,221 @@ function LovedCell({ rating }: { rating: any }) {
   );
 }
 
+// ─── Genre Map ────────────────────────────────────────────────────────────────
+
+function GenreMap({
+  genres,
+  onGenrePress,
+}: {
+  genres: GenreCell[];
+  onGenrePress: (genre: GenreCell, rank: number) => void;
+}) {
+  const { colors } = useTheme();
+
+  if (genres.length === 0) {
+    return (
+      <View style={[styles.distCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+        <Text variant="caption" color="secondary" align="center" style={{ paddingVertical: spacing[4] }}>
+          No genre data available. Rate more tracks to see your top genres.
+        </Text>
+      </View>
+    );
+  }
+
+  const featured = genres[0];
+  const midPair = genres.slice(1, 3);
+  const bottomTrio = genres.slice(3, 6);
+
+  return (
+    <View style={{ gap: spacing[2] }}>
+      {featured && (
+        <GenreFeaturedCell genre={featured} rank={1} onPress={() => onGenrePress(featured, 1)} />
+      )}
+      {midPair.length > 0 && (
+        <View style={{ flexDirection: 'row', gap: spacing[2] }}>
+          {midPair.map((g, i) => (
+            <GenreMidCell key={g.genre} genre={g} rank={i + 2} onPress={() => onGenrePress(g, i + 2)} />
+          ))}
+        </View>
+      )}
+      {bottomTrio.length > 0 && (
+        <View style={{ flexDirection: 'row', gap: spacing[2] }}>
+          {bottomTrio.map((g, i) => (
+            <GenreMiniCell key={g.genre} genre={g} rank={i + 4} onPress={() => onGenrePress(g, i + 4)} />
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
+function GenreFeaturedCell({ genre, rank, onPress }: { genre: GenreCell; rank: number; onPress: () => void }) {
+  const { colors } = useTheme();
+  const strip = scoreColor(genre.avgScore, colors);
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.featuredCell,
+        { backgroundColor: colors.surfaceElevated, borderColor: colors.border, opacity: pressed ? 0.8 : 1 },
+      ]}
+    >
+      {genre.imageUrl ? (
+        <Image
+          source={{ uri: genre.imageUrl }}
+          style={[StyleSheet.absoluteFill, { opacity: 0.22, borderRadius: radii.lg }]}
+          resizeMode="cover"
+        />
+      ) : null}
+      <View style={[styles.rankBadge, { backgroundColor: strip }]}>
+        <Text style={{ fontSize: 10, fontWeight: '800', color: '#080808', letterSpacing: 0.3 }}>
+          #{rank}
+        </Text>
+      </View>
+      <View style={{ flex: 1, justifyContent: 'flex-end' }}>
+        <Text style={{ fontSize: 20, fontWeight: '800', color: colors.text, letterSpacing: -0.4 }} numberOfLines={1}>
+          {genre.name}
+        </Text>
+        <Text variant="caption" color="secondary" style={{ marginTop: 2 }}>
+          {genre.count} {genre.count === 1 ? 'track' : 'tracks'} · avg {genre.avgScore.toFixed(1)}
+        </Text>
+      </View>
+      <View style={[styles.scoreStrip, styles.scoreStripLg, { backgroundColor: strip }]} />
+    </Pressable>
+  );
+}
+
+function GenreMidCell({ genre, rank, onPress }: { genre: GenreCell; rank: number; onPress: () => void }) {
+  const { colors } = useTheme();
+  const strip = scoreColor(genre.avgScore, colors);
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.midCell,
+        { backgroundColor: colors.surfaceElevated, borderColor: colors.border, opacity: pressed ? 0.8 : 1 },
+      ]}
+    >
+      {genre.imageUrl ? (
+        <Image
+          source={{ uri: genre.imageUrl }}
+          style={[StyleSheet.absoluteFill, { opacity: 0.18, borderRadius: radii.md }]}
+          resizeMode="cover"
+        />
+      ) : null}
+      <View style={[styles.rankBadgeSmall, { backgroundColor: colors.surface }]}>
+        <Text style={{ fontSize: 9, fontWeight: '800', color: colors.textSecondary }}>
+          #{rank}
+        </Text>
+      </View>
+      <View style={{ flex: 1, justifyContent: 'flex-end' }}>
+        <Text style={{ fontSize: 13, fontWeight: '700', color: colors.text }} numberOfLines={1}>
+          {genre.name}
+        </Text>
+        <Text style={{ fontSize: 11, color: colors.textSecondary, marginTop: 1 }}>
+          {genre.count} tracks
+        </Text>
+      </View>
+      <View style={[styles.scoreStrip, styles.scoreStripMd, { backgroundColor: strip }]} />
+    </Pressable>
+  );
+}
+
+function GenreMiniCell({ genre, rank, onPress }: { genre: GenreCell; rank: number; onPress: () => void }) {
+  const { colors } = useTheme();
+  const strip = scoreColor(genre.avgScore, colors);
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.miniCell,
+        { backgroundColor: colors.surfaceElevated, borderColor: colors.border, opacity: pressed ? 0.8 : 1 },
+      ]}
+    >
+      {genre.imageUrl ? (
+        <Image
+          source={{ uri: genre.imageUrl }}
+          style={[StyleSheet.absoluteFill, { opacity: 0.18, borderRadius: radii.sm }]}
+          resizeMode="cover"
+        />
+      ) : null}
+      <View style={{ flex: 1, justifyContent: 'flex-end' }}>
+        <Text style={{ fontSize: 11, fontWeight: '700', color: colors.textSecondary }} numberOfLines={1}>
+          #{rank}
+        </Text>
+        <Text style={{ fontSize: 12, fontWeight: '700', color: colors.text }} numberOfLines={1}>
+          {genre.name}
+        </Text>
+      </View>
+      <View style={[styles.scoreStrip, styles.scoreStripSm, { backgroundColor: strip }]} />
+    </Pressable>
+  );
+}
+
+// ─── Genre sheet ──────────────────────────────────────────────────────────────
+
+function GenreSheet({
+  genre,
+  rank,
+  tracks,
+  onClose,
+}: {
+  genre: GenreCell;
+  rank: number;
+  tracks: any[];
+  onClose: () => void;
+}) {
+  const { colors } = useTheme();
+  const strip = scoreColor(genre.avgScore, colors);
+
+  return (
+    <Modal animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <View style={[sheet.root, { backgroundColor: colors.bg }]}>
+        <View style={sheet.handleRow}>
+          <View style={[sheet.handle, { backgroundColor: colors.borderStrong }]} />
+        </View>
+
+        <View style={sheet.header}>
+          <View style={{ flex: 1, gap: spacing[1] }}>
+            <Text
+              style={{ fontSize: 26, fontWeight: '800', color: colors.text, letterSpacing: -0.6 }}
+              numberOfLines={1}
+            >
+              {genre.name}
+            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing[2] }}>
+              <View style={[sheet.rankPill, { backgroundColor: strip }]}>
+                <Text style={{ fontSize: 10, fontWeight: '800', color: '#080808', letterSpacing: 0.3 }}>
+                  #{rank}
+                </Text>
+              </View>
+              <Text variant="caption" color="secondary">
+                {tracks.length} {tracks.length === 1 ? 'track' : 'tracks'} · avg {genre.avgScore.toFixed(1)}
+              </Text>
+            </View>
+          </View>
+          <Pressable onPress={onClose} hitSlop={16} style={sheet.closeBtn}>
+            <Text style={{ fontSize: 15, color: colors.textSecondary, fontWeight: '600' }}>Done</Text>
+          </Pressable>
+        </View>
+
+        <View style={[sheet.divider, { backgroundColor: colors.border }]} />
+
+        <FlatList
+          data={tracks}
+          keyExtractor={(r) => r.id}
+          contentContainerStyle={sheet.listContent}
+          showsVerticalScrollIndicator={false}
+          ItemSeparatorComponent={() => (
+            <View style={[sheet.separator, { backgroundColor: colors.border }]} />
+          )}
+          renderItem={({ item }) => <ArtistTrackRow rating={item} />}
+        />
+      </View>
+    </Modal>
+  );
+}
+
 // ─── Artist sheet ─────────────────────────────────────────────────────────────
 
 function ArtistSheet({
@@ -779,6 +1188,83 @@ function ArtistTrackRow({ rating }: { rating: any }) {
         </Text>
       </View>
     </View>
+  );
+}
+
+// ─── Ratings sheet ────────────────────────────────────────────────────────────
+
+function RatingsSheet({
+  ratings,
+  avgScore,
+  onClose,
+}: {
+  ratings: any[];
+  avgScore: number;
+  onClose: () => void;
+}) {
+  const { colors } = useTheme();
+  const [sort, setSort] = useState<'score' | 'recent'>('score');
+
+  const sorted = sort === 'score'
+    ? [...ratings].sort((a, b) => b.score - a.score)
+    : ratings; // already ordered by created_at desc from the fetch
+
+  return (
+    <Modal animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <View style={[sheet.root, { backgroundColor: colors.bg }]}>
+
+        {/* Handle */}
+        <View style={sheet.handleRow}>
+          <View style={[sheet.handle, { backgroundColor: colors.borderStrong }]} />
+        </View>
+
+        {/* Header */}
+        <View style={sheet.header}>
+          <View style={{ flex: 1, gap: spacing[1] }}>
+            <Text style={{ fontSize: 26, fontWeight: '800', color: colors.text, letterSpacing: -0.6 }}>
+              All Ratings
+            </Text>
+            <Text variant="caption" color="secondary">
+              {ratings.length} {ratings.length === 1 ? 'track' : 'tracks'} · avg {avgScore.toFixed(1)}
+            </Text>
+          </View>
+          <Pressable onPress={onClose} hitSlop={16} style={sheet.closeBtn}>
+            <Text style={{ fontSize: 15, color: colors.textSecondary, fontWeight: '600' }}>Done</Text>
+          </Pressable>
+        </View>
+
+        {/* Sort toggle */}
+        <View style={{ flexDirection: 'row', gap: spacing[2], paddingHorizontal: spacing[5], paddingBottom: spacing[3] }}>
+          {(['score', 'recent'] as const).map((s) => (
+            <Pressable
+              key={s}
+              onPress={() => setSort(s)}
+              style={[
+                sheet.sortPill,
+                { backgroundColor: sort === s ? colors.accent : colors.surfaceElevated },
+              ]}
+            >
+              <Text style={{ fontSize: 12, fontWeight: '700', color: sort === s ? '#080808' : colors.textSecondary }}>
+                {s === 'score' ? 'Top rated' : 'Recent'}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+
+        <View style={[sheet.divider, { backgroundColor: colors.border }]} />
+
+        <FlatList
+          data={sorted}
+          keyExtractor={(r) => r.id}
+          contentContainerStyle={sheet.listContent}
+          showsVerticalScrollIndicator={false}
+          ItemSeparatorComponent={() => (
+            <View style={[sheet.separator, { backgroundColor: colors.border }]} />
+          )}
+          renderItem={({ item }) => <ArtistTrackRow rating={item} />}
+        />
+      </View>
+    </Modal>
   );
 }
 
@@ -942,6 +1428,14 @@ const styles = StyleSheet.create({
     padding: spacing[6],
   },
 
+  // Taste Map toggle
+  tasteTogglePill: {
+    paddingHorizontal: spacing[3],
+    paddingVertical: spacing[1],
+    borderRadius: radii.full,
+  },
+
+
   // Today's vibe card
   vibeCard: {
     flexDirection: 'row',
@@ -1036,5 +1530,10 @@ const sheet = StyleSheet.create({
   separator: {
     height: 1,
     marginLeft: spacing[5] + 48 + spacing[3],
+  },
+  sortPill: {
+    paddingHorizontal: spacing[3],
+    paddingVertical: spacing[1],
+    borderRadius: radii.full,
   },
 });

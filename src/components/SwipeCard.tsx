@@ -1,5 +1,6 @@
 import React, { useCallback } from 'react';
 import { Dimensions, Image, StyleSheet, View } from 'react-native';
+import { MusicNotes } from './MusicNotes';
 import Animated, {
   interpolate,
   runOnJS,
@@ -22,6 +23,7 @@ export interface Track {
   id: string;
   name: string;
   artists: string[];
+  artistIds?: string[];
   albumName: string;
   imageUrl: string;
   previewUrl?: string;
@@ -34,6 +36,7 @@ interface SwipeCardProps {
   totalCards: number;
   onSwipeLeft: () => void;
   onSwipeRight: () => void;
+  isPlaying?: boolean;
 }
 
 export function SwipeCard({
@@ -42,6 +45,7 @@ export function SwipeCard({
   totalCards,
   onSwipeLeft,
   onSwipeRight,
+  isPlaying = false,
 }: SwipeCardProps) {
   const { colors } = useTheme();
   const translateX = useSharedValue(0);
@@ -104,97 +108,114 @@ export function SwipeCard({
 
   return (
     <GestureDetector gesture={gesture}>
-      <Animated.View style={[styles.card, cardAnimStyle]}>
-        {/* Album Art */}
-        <Image
-          source={{ uri: track.imageUrl }}
-          style={styles.image}
-          resizeMode="cover"
-        />
+      {/*
+        Outer wrapper: position + size + z-index, NO overflow:hidden.
+        This allows MusicNotes to float above the card boundary.
+      */}
+      <Animated.View style={[styles.cardWrapper, cardAnimStyle]}>
+        {/* Notes rendered BEFORE card — painted behind it. They start within
+            the card's bounds and emerge above the top edge as they float up. */}
+        {isPlaying && <MusicNotes />}
+        {/* Inner card: handles borderRadius + clip */}
+        <View style={styles.card}>
+          {/* Album Art */}
+          <Image
+            source={{ uri: track.imageUrl }}
+            style={styles.image}
+            resizeMode="cover"
+          />
 
-        {/* Gradient overlay */}
-        <LinearGradient
-          colors={['transparent', 'rgba(0,0,0,0.85)']}
-          style={StyleSheet.absoluteFill}
-          start={{ x: 0, y: 0.45 }}
-          end={{ x: 0, y: 1 }}
-          pointerEvents="none"
-        />
+          {/* Gradient overlay */}
+          <LinearGradient
+            colors={['transparent', 'rgba(0,0,0,0.85)']}
+            style={StyleSheet.absoluteFill}
+            start={{ x: 0, y: 0.45 }}
+            end={{ x: 0, y: 1 }}
+            pointerEvents="none"
+          />
 
-        {/* Like indicator */}
-        <Animated.View style={[styles.likeLabel, likeOpacity]}>
-          <Text
-            style={{
-              color: '#B5FF4E',
-              fontSize: 20,
-              fontWeight: '900',
-              letterSpacing: 2,
-              textTransform: 'uppercase',
-              borderWidth: 3,
-              borderColor: '#B5FF4E',
-              paddingHorizontal: 10,
-              paddingVertical: 4,
-              borderRadius: 4,
-            }}
-          >
-            Love
-          </Text>
-        </Animated.View>
+          {/* Like indicator */}
+          <Animated.View style={[styles.likeLabel, likeOpacity]}>
+            <Text
+              style={{
+                color: '#B5FF4E',
+                fontSize: 20,
+                fontWeight: '900',
+                letterSpacing: 2,
+                textTransform: 'uppercase',
+                borderWidth: 3,
+                borderColor: '#B5FF4E',
+                paddingHorizontal: 10,
+                paddingVertical: 4,
+                borderRadius: 4,
+              }}
+            >
+              Love
+            </Text>
+          </Animated.View>
 
-        {/* Pass indicator */}
-        <Animated.View style={[styles.passLabel, passOpacity]}>
-          <Text
-            style={{
-              color: '#F87171',
-              fontSize: 20,
-              fontWeight: '900',
-              letterSpacing: 2,
-              textTransform: 'uppercase',
-              borderWidth: 3,
-              borderColor: '#F87171',
-              paddingHorizontal: 10,
-              paddingVertical: 4,
-              borderRadius: 4,
-            }}
-          >
-            Pass
-          </Text>
-        </Animated.View>
+          {/* Pass indicator */}
+          <Animated.View style={[styles.passLabel, passOpacity]}>
+            <Text
+              style={{
+                color: '#F87171',
+                fontSize: 20,
+                fontWeight: '900',
+                letterSpacing: 2,
+                textTransform: 'uppercase',
+                borderWidth: 3,
+                borderColor: '#F87171',
+                paddingHorizontal: 10,
+                paddingVertical: 4,
+                borderRadius: 4,
+              }}
+            >
+              Pass
+            </Text>
+          </Animated.View>
 
-        {/* Track Info */}
-        <View style={styles.info}>
-          <Text
-            style={{
-              fontSize: 22,
-              fontWeight: '700',
-              color: '#F2F2F2',
-              lineHeight: 26,
-            }}
-            numberOfLines={2}
-          >
-            {track.name}
-          </Text>
-          <Text
-            style={{ fontSize: 15, color: 'rgba(242,242,242,0.7)', marginTop: 4 }}
-            numberOfLines={1}
-          >
-            {track.artists.join(', ')}
-          </Text>
-          <Text
-            style={{ fontSize: 12, color: 'rgba(242,242,242,0.45)', marginTop: 2 }}
-            numberOfLines={1}
-          >
-            {track.albumName}
-          </Text>
+          {/* Track Info */}
+          <View style={styles.info}>
+            <Text
+              style={{
+                fontSize: 22,
+                fontWeight: '700',
+                color: '#F2F2F2',
+                lineHeight: 26,
+              }}
+              numberOfLines={2}
+            >
+              {track.name}
+            </Text>
+            <Text
+              style={{ fontSize: 15, color: 'rgba(242,242,242,0.7)', marginTop: 4 }}
+              numberOfLines={1}
+            >
+              {track.artists.join(', ')}
+            </Text>
+            <Text
+              style={{ fontSize: 12, color: 'rgba(242,242,242,0.45)', marginTop: 2 }}
+              numberOfLines={1}
+            >
+              {track.albumName}
+            </Text>
+          </View>
         </View>
+
       </Animated.View>
     </GestureDetector>
   );
 }
 
 const styles = StyleSheet.create({
-  card: {
+  // Outer wrapper — no overflow clip so notes can float above
+  cardWrapper: {
     position: 'absolute',
+    width: CARD_WIDTH,
+    height: CARD_HEIGHT,
+  },
+  // Inner card — clips image + gradient to rounded corners
+  card: {
     width: CARD_WIDTH,
     height: CARD_HEIGHT,
     borderRadius: radii['2xl'],

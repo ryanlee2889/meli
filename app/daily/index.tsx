@@ -1,14 +1,13 @@
 /**
  * Daily Queue — rate 10 tracks, discover your day's vibe.
  */
-import { useRef, useState, useCallback } from 'react';
+import { useRef, useState, useCallback, useEffect } from 'react';
 import {
   View,
   StyleSheet,
   Image,
   Pressable,
   Dimensions,
-  ActivityIndicator,
   Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -16,9 +15,11 @@ import { router, useFocusEffect } from 'expo-router';
 import { Audio } from 'expo-av';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useTheme } from '@/hooks/useTheme';
+import { Skeleton } from '@/components/ui/Skeleton';
 import { Text } from '@/components/ui/Text';
 import { Button } from '@/components/ui/Button';
 import { RatingControl } from '@/components/RatingControl';
+import { MusicNotes } from '@/components/MusicNotes';
 import { spacing, radii } from '@/theme';
 import {
   ensureDailyQueue,
@@ -29,6 +30,7 @@ import {
   type DailyQueue,
 } from '@/lib/dailyApi';
 import { getStoredSpotifyToken } from '@/lib/spotify';
+import { fetchDeezerPreview } from '@/lib/deezer';
 
 const { width } = Dimensions.get('window');
 const ART_SIZE = width - spacing[5] * 2;
@@ -41,6 +43,7 @@ export default function DailyQueueScreen() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [playing, setPlaying] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
   // null = no error, 'no_token' = not connected, 'build_failed' = connected but queue failed
   const [queueError, setQueueError] = useState<'no_token' | 'build_failed' | null>(null);
   const soundRef = useRef<Audio.Sound | null>(null);
@@ -56,6 +59,36 @@ export default function DailyQueueScreen() {
       };
     }, [])
   );
+
+  // Auto-play preview whenever the current item changes
+  useEffect(() => {
+    if (!currentItem) return;
+    let cancelled = false;
+    const item = currentItem.item;
+    const artists: string[] = Array.isArray(item?.artists_json) ? item.artists_json : [];
+
+    setPreviewLoading(true);
+    fetchDeezerPreview(item?.name ?? '', artists[0] ?? '').then(async (url) => {
+      if (cancelled || !url) { setPreviewLoading(false); return; }
+      await stopAudio();
+      if (cancelled) return;
+      try {
+        const { sound } = await Audio.Sound.createAsync(
+          { uri: url },
+          { shouldPlay: true, isLooping: true }
+        );
+        if (cancelled) { sound.unloadAsync(); return; }
+        soundRef.current = sound;
+        setPlaying(true);
+      } catch {
+        setPlaying(false);
+      } finally {
+        setPreviewLoading(false);
+      }
+    });
+
+    return () => { cancelled = true; };
+  }, [currentItem?.id]);
 
   async function loadQueue() {
     setLoading(true);
@@ -113,12 +146,13 @@ export default function DailyQueueScreen() {
       soundRef.current = null;
     }
     setPlaying(false);
+    setPreviewLoading(false);
   }
 
   async function togglePreview() {
-    const previewUrl = currentItem?.item?.preview_url;
-    if (!previewUrl) return;
+    if (!currentItem) return;
 
+    // If audio already loaded, just toggle pause/play
     if (soundRef.current) {
       const status = await soundRef.current.getStatusAsync();
       if (status.isLoaded && status.isPlaying) {
@@ -132,19 +166,22 @@ export default function DailyQueueScreen() {
       }
     }
 
-    // Load fresh
+    // Fetch preview from Deezer (Spotify no longer provides preview_url for new apps)
+    const item = currentItem.item;
+    const artists: string[] = Array.isArray(item?.artists_json) ? item.artists_json : [];
+    setPreviewLoading(true);
+    const previewUrl = await fetchDeezerPreview(item?.name ?? '', artists[0] ?? '');
+    setPreviewLoading(false);
+
+    if (!previewUrl) return;
+
     await stopAudio();
     const { sound } = await Audio.Sound.createAsync(
       { uri: previewUrl },
-      { shouldPlay: true }
+      { shouldPlay: true, isLooping: true }
     );
     soundRef.current = sound;
     setPlaying(true);
-    sound.setOnPlaybackStatusUpdate((status) => {
-      if (status.isLoaded && status.didJustFinish) {
-        setPlaying(false);
-      }
-    });
   }
 
   async function handleSubmit(score: number) {
@@ -192,16 +229,7 @@ export default function DailyQueueScreen() {
   // ── Loading ───────────────────────────────────────────────────────────────
 
   if (loading) {
-    return (
-      <SafeAreaView style={[styles.root, { backgroundColor: colors.bg }]} edges={['top', 'bottom']}>
-        <View style={styles.loadingCenter}>
-          <ActivityIndicator color={colors.accent} size="large" />
-          <Text variant="body" color="secondary" align="center" style={{ marginTop: spacing[4] }}>
-            Building your daily queue…
-          </Text>
-        </View>
-      </SafeAreaView>
-    );
+    return <DailyQueueSkeleton />;
   }
 
   // ── No Spotify / no queue ─────────────────────────────────────────────────
@@ -293,7 +321,6 @@ export default function DailyQueueScreen() {
     );
   }
 
-  const hasPreview = !!currentItem.item?.preview_url;
   const trackName = currentItem.item?.name ?? 'Unknown';
   const artists: string[] = Array.isArray(currentItem.item?.artists_json)
     ? currentItem.item.artists_json
@@ -314,10 +341,15 @@ export default function DailyQueueScreen() {
           </Text>
         </View>
         <ProgressDots total={totalItems} done={doneCount} current={currentIndex} colors={colors} />
+        <Pressable onPress={() => router.replace('/(tabs)/profile')} hitSlop={12}>
+          <Text style={{ fontSize: 15, color: colors.textTertiary, fontWeight: '500' }}>✕</Text>
+        </Pressable>
       </View>
 
       {/* ── Album Art ── */}
       <View style={styles.artContainer}>
+        <View style={{ position: 'relative' }}>
+        {playing && <MusicNotes />}
         <View style={[styles.artCard, { backgroundColor: colors.surfaceElevated }]}>
           {imageUrl ? (
             <Image
@@ -352,23 +384,7 @@ export default function DailyQueueScreen() {
             </Text>
           </View>
 
-          {/* Preview button */}
-          {hasPreview && (
-            <Pressable
-              style={[styles.previewBtn, { backgroundColor: playing ? colors.accent : 'rgba(0,0,0,0.55)' }]}
-              onPress={togglePreview}
-            >
-              <Text
-                style={{
-                  fontSize: 18,
-                  color: playing ? '#080808' : '#F2F2F2',
-                  lineHeight: 22,
-                }}
-              >
-                {playing ? '⏸' : '▶'}
-              </Text>
-            </Pressable>
-          )}
+        </View>
         </View>
       </View>
 
@@ -378,9 +394,54 @@ export default function DailyQueueScreen() {
           trackName={trackName}
           onSubmit={handleSubmit}
           onSkip={handleSkip}
+          previewPlaying={playing}
+          previewLoading={previewLoading}
+          onTogglePreview={togglePreview}
         />
       </View>
 
+    </SafeAreaView>
+  );
+}
+
+// ─── Skeleton ────────────────────────────────────────────────────────────────
+
+function DailyQueueSkeleton() {
+  const { colors } = useTheme();
+  return (
+    <SafeAreaView style={[styles.root, { backgroundColor: colors.bg }]} edges={['top', 'bottom']}>
+      {/* Header */}
+      <View style={styles.header}>
+        <View style={{ gap: 5 }}>
+          <Skeleton width={52} height={20} />
+          <Skeleton width={80} height={13} />
+        </View>
+        <View style={styles.dotsRow}>
+          {Array.from({ length: 10 }).map((_, i) => (
+            <Skeleton key={i} width={6} height={6} borderRadius={3} />
+          ))}
+        </View>
+        <Skeleton width={16} height={16} borderRadius={8} />
+      </View>
+
+      {/* Album art placeholder */}
+      <View style={styles.artContainer}>
+        <Skeleton width={ART_SIZE} height={ART_SIZE * 0.78} borderRadius={radii['2xl']} />
+      </View>
+
+      {/* Rating control placeholder */}
+      <View style={[styles.ratingContainer, { gap: spacing[4] }]}>
+        <Skeleton width={160} height={22} style={{ alignSelf: 'center' }} />
+        <View style={{ flexDirection: 'row', justifyContent: 'center', gap: spacing[2] }}>
+          {Array.from({ length: 10 }).map((_, i) => (
+            <Skeleton key={i} width={28} height={44} borderRadius={radii.md} />
+          ))}
+        </View>
+        <View style={{ flexDirection: 'row', gap: spacing[3] }}>
+          <Skeleton width="48%" height={48} borderRadius={radii.xl} />
+          <Skeleton width="48%" height={48} borderRadius={radii.xl} />
+        </View>
+      </View>
     </SafeAreaView>
   );
 }
@@ -479,17 +540,6 @@ const styles = StyleSheet.create({
     right: 0,
     padding: spacing[5],
   },
-  previewBtn: {
-    position: 'absolute',
-    top: spacing[4],
-    right: spacing[4],
-    width: 40,
-    height: 40,
-    borderRadius: radii.full,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-
   ratingContainer: {
     paddingHorizontal: spacing[5],
     paddingTop: spacing[4],

@@ -7,7 +7,11 @@
       "Bash(git -C /Users/ryan/Documents/Projects/vibecheck ls-files:*)",
       "Bash(git -C /Users/ryan/Documents/Projects/vibecheck rm -r --cached:*)",
       "Bash(npx tsc:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(node -e:*)",
+      "Bash(npx supabase db push:*)",
+      "Bash(npx supabase db execute:*)"
     ]
   }
 }

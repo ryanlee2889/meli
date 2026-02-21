@@ -7,17 +7,18 @@ import {
   StyleSheet,
   FlatList,
   Image,
-  ActivityIndicator,
   Alert,
   Pressable,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useTheme } from '@/hooks/useTheme';
+import { Skeleton } from '@/components/ui/Skeleton';
 import { Text } from '@/components/ui/Text';
 import { Button } from '@/components/ui/Button';
 import { spacing, radii } from '@/theme';
 import { getTodayPlaylist, type DailyPlaylist, type DailyPlaylistItem } from '@/lib/dailyApi';
+import { useNextQueueCountdown } from '@/hooks/useNextQueueCountdown';
 
 // ─── Mood config ─────────────────────────────────────────────────────────────
 
@@ -74,6 +75,7 @@ function scoreColor(score: number): string {
 
 export default function DailyPlaylistScreen() {
   const { colors } = useTheme();
+  const countdown = useNextQueueCountdown();
   const [loading, setLoading] = useState(true);
   const [playlist, setPlaylist] = useState<DailyPlaylist | null>(null);
   const [items, setItems] = useState<DailyPlaylistItem[]>([]);
@@ -103,13 +105,7 @@ export default function DailyPlaylistScreen() {
   // ── Loading ───────────────────────────────────────────────────────────────
 
   if (loading) {
-    return (
-      <SafeAreaView style={[styles.root, { backgroundColor: colors.bg }]} edges={['top', 'bottom']}>
-        <View style={styles.center}>
-          <ActivityIndicator color={colors.accent} size="large" />
-        </View>
-      </SafeAreaView>
-    );
+    return <DailyPlaylistSkeleton />;
   }
 
   // ── No playlist yet ───────────────────────────────────────────────────────
@@ -193,17 +189,24 @@ export default function DailyPlaylistScreen() {
               color="secondary"
               style={{ marginBottom: spacing[3] }}
             >
-              {items.length} {items.length === 1 ? 'track' : 'tracks'} · scored 7+
+              {items.length} {items.length === 1 ? 'track' : 'tracks'} · sorted by score
             </Text>
           }
           ListFooterComponent={
-            <View style={{ marginTop: spacing[6] }}>
+            <View style={{ marginTop: spacing[6], gap: spacing[4] }}>
               <Button
                 label="Export to Spotify"
-                variant="outline"
+                variant="secondary"
                 size="md"
                 onPress={handleExportSpotify}
               />
+              <Text
+                variant="caption"
+                color="tertiary"
+                align="center"
+              >
+                Next queue in {countdown}
+              </Text>
             </View>
           }
           ItemSeparatorComponent={() => (
@@ -222,13 +225,52 @@ export default function DailyPlaylistScreen() {
             align="center"
             style={{ marginTop: spacing[3], paddingHorizontal: spacing[6] }}
           >
-            No tracks scored 7 or above today. That's okay — tomorrow's a new queue.
+            You skipped everything today. Tomorrow's a new queue.
           </Text>
           <View style={{ marginTop: spacing[5] }}>
             <Button label="Done" variant="primary" size="md" onPress={handleDone} />
           </View>
         </View>
       )}
+    </SafeAreaView>
+  );
+}
+
+// ─── Skeleton ────────────────────────────────────────────────────────────────
+
+function DailyPlaylistSkeleton() {
+  const { colors } = useTheme();
+  return (
+    <SafeAreaView style={[styles.root, { backgroundColor: colors.bg }]} edges={['top', 'bottom']}>
+      {/* Header */}
+      <View style={styles.header}>
+        <Skeleton width={120} height={13} />
+        <Skeleton width={36} height={16} />
+      </View>
+
+      {/* Mood banner */}
+      <View style={{ marginHorizontal: spacing[5], marginBottom: spacing[5] }}>
+        <Skeleton width="100%" height={84} borderRadius={radii.xl} />
+      </View>
+
+      {/* Track rows */}
+      <View style={{ paddingHorizontal: spacing[5], gap: 0 }}>
+        <Skeleton width={100} height={12} style={{ marginBottom: spacing[3] }} />
+        {Array.from({ length: 7 }).map((_, i) => (
+          <View key={i}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing[3], paddingVertical: spacing[3] }}>
+              <Skeleton width={20} height={13} />
+              <Skeleton width={48} height={48} borderRadius={radii.md} />
+              <View style={{ flex: 1, gap: 5 }}>
+                <Skeleton width="65%" height={14} />
+                <Skeleton width="45%" height={12} />
+              </View>
+              <Skeleton width={32} height={32} borderRadius={radii.md} />
+            </View>
+            {i < 6 && <View style={[styles.separator, { backgroundColor: colors.border }]} />}
+          </View>
+        ))}
+      </View>
     </SafeAreaView>
   );
 }

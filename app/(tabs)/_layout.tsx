@@ -15,7 +15,6 @@ function TabBar({ state, descriptors, navigation }: BottomTabBarProps) {
     profile: '○',
     discover: '◈',
     lists: '≡',
-    daily: '✦',
   };
 
   return (
@@ -85,7 +84,6 @@ export default function TabsLayout() {
       <Tabs.Screen name="profile" options={{ title: 'Profile' }} />
       <Tabs.Screen name="discover" options={{ title: 'Discover' }} />
       <Tabs.Screen name="lists" options={{ title: 'Lists' }} />
-      <Tabs.Screen name="daily" options={{ title: 'Daily' }} />
     </Tabs>
   );
 }

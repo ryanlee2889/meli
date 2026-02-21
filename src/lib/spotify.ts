@@ -94,6 +94,7 @@ export type SpotifyTrack = {
   id: string;
   name: string;
   artists: string[];
+  artistIds: string[];
   albumName: string;
   imageUrl: string | null;
   previewUrl: string | null;
@@ -112,19 +113,48 @@ function mapSpotifyTrack(t: any): SpotifyTrack {
     id: t.id,
     name: t.name,
     artists: (t.artists ?? []).map((a: any) => a.name as string),
+    artistIds: (t.artists ?? []).map((a: any) => a.id as string),
     albumName: t.album?.name ?? '',
     imageUrl: t.album?.images?.[0]?.url ?? null,
     previewUrl: t.preview_url ?? null,
   };
 }
 
-/** User's top tracks across medium term (4 weeks). */
-export async function fetchTopTracks(token: string, limit = 50): Promise<SpotifyTrack[]> {
+type TimeRange = 'short_term' | 'medium_term' | 'long_term';
+
+/** User's top tracks for a given time range. */
+export async function fetchTopTracks(
+  token: string,
+  limit = 50,
+  timeRange: TimeRange = 'medium_term',
+): Promise<SpotifyTrack[]> {
   const data = await spotifyGet<{ items: any[] }>(
-    `/me/top/tracks?limit=${limit}&time_range=medium_term`,
+    `/me/top/tracks?limit=${limit}&time_range=${timeRange}`,
     token
   );
   return (data?.items ?? []).map(mapSpotifyTrack);
+}
+
+/**
+ * Top tracks across all three time ranges combined.
+ * Gives the widest possible pool regardless of listening recency.
+ */
+export async function fetchAllTopTracks(token: string): Promise<SpotifyTrack[]> {
+  const [short, medium, long] = await Promise.all([
+    fetchTopTracks(token, 50, 'short_term'),
+    fetchTopTracks(token, 50, 'medium_term'),
+    fetchTopTracks(token, 50, 'long_term'),
+  ]);
+  return [...short, ...medium, ...long];
+}
+
+/** Recently played tracks (up to 50). */
+export async function fetchRecentlyPlayed(token: string): Promise<SpotifyTrack[]> {
+  const data = await spotifyGet<{ items: any[] }>(
+    '/me/player/recently-played?limit=50',
+    token
+  );
+  return (data?.items ?? []).map((i: any) => mapSpotifyTrack(i.track));
 }
 
 /** Recommendations seeded from the user's top artists. */
@@ -149,3 +179,8 @@ export async function fetchTopArtistIds(token: string, limit = 5): Promise<strin
   );
   return (data?.items ?? []).map((a: any) => a.id as string);
 }
+
+/**
+ * Batch-fetch genres for up to 50 artist IDs using Spotify's artists endpoint.
+ * Returns a map of artistId → genres[].
+ */

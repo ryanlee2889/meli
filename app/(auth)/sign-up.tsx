@@ -36,6 +36,7 @@ export default function SignUpScreen() {
       email: email.trim(),
       password,
       options: {
+        emailRedirectTo: 'vibecheck://',
         data: {
           username: username.trim(),
           invite_code_used: inviteCode.trim() || null,

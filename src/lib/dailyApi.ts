@@ -5,10 +5,13 @@
 import { supabase } from './supabase';
 import {
   getStoredSpotifyToken,
-  fetchTopTracks,
+  fetchAllTopTracks,
+  fetchRecentlyPlayed,
   fetchTopArtistIds,
   fetchRecommendations,
 } from './spotify';
+import { fetchDeezerGenres } from './deezer';
+// Note: fetchAudioFeatures removed — Spotify deprecated that endpoint for new apps
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -82,20 +85,32 @@ function shuffle<T>(arr: T[]): T[] {
   return a;
 }
 
-/** Compute mood label from rated queue items' audio features. */
-export function computeMood(
-  audioFeaturesList: Array<{ valence: number; energy: number }>
-): string {
-  if (!audioFeaturesList.length) return 'mixed';
-  const n = audioFeaturesList.length;
-  const avgValence = audioFeaturesList.reduce((s, f) => s + f.valence, 0) / n;
-  const avgEnergy = audioFeaturesList.reduce((s, f) => s + f.energy, 0) / n;
+/**
+ * Compute mood label from the user's rating scores.
+ * Audio features API is deprecated for new Spotify apps so we derive
+ * mood from score distribution instead.
+ *
+ * High avg + low spread  → hype   (loving everything)
+ * Mid-high avg           → bright (enjoying the day)
+ * High spread            → mixed  (inconsistent taste today)
+ * Mid-low avg            → chill  (selective / understated)
+ * Low avg                → moody  (nothing landing)
+ */
+export function computeMood(scores: number[]): string {
+  if (!scores.length) return 'mixed';
 
-  if (avgValence >= 0.6 && avgEnergy >= 0.7) return 'hype';
-  if (avgValence >= 0.6 && avgEnergy < 0.7) return 'bright';
-  if (avgValence < 0.6 && avgEnergy < 0.5) return 'chill';
-  if (avgValence < 0.4 && avgEnergy >= 0.5) return 'moody';
-  return 'mixed';
+  const n = scores.length;
+  const avg = scores.reduce((s, x) => s + x, 0) / n;
+  const variance = scores.reduce((s, x) => s + (x - avg) ** 2, 0) / n;
+  const stdDev = Math.sqrt(variance);
+
+  // High spread across scores → genuinely mixed day
+  if (stdDev >= 2.5) return 'mixed';
+
+  if (avg >= 8) return 'hype';
+  if (avg >= 6.5) return 'bright';
+  if (avg >= 4.5) return 'chill';
+  return 'moody';
 }
 
 /** Fetch audio features for up to 100 track IDs. Returns map of spotifyId → features. */
@@ -152,50 +167,57 @@ export async function ensureDailyQueue(): Promise<{
   const token = await getStoredSpotifyToken();
   if (!token) return null;
 
-  // Fetch tracks + audio features in parallel
-  const [topTracks, topArtistIds] = await Promise.all([
-    fetchTopTracks(token, 50),
+  // Cast a wide net: all time ranges + recently played + recommendations
+  const [allTop, recentlyPlayed, topArtistIds] = await Promise.all([
+    fetchAllTopTracks(token),
+    fetchRecentlyPlayed(token),
     fetchTopArtistIds(token, 5),
   ]);
 
-  let candidates = [...topTracks];
+  let candidates = [...allTop, ...recentlyPlayed];
   if (topArtistIds.length) {
     const recs = await fetchRecommendations(token, topArtistIds, 30);
-    candidates = [...topTracks, ...recs];
+    candidates = [...candidates, ...recs];
   }
 
-  // Deduplicate by spotify ID
+  // Deduplicate by Spotify ID only — no imageUrl requirement
   const seen = new Set<string>();
   candidates = candidates.filter((t) => {
-    if (seen.has(t.id) || !t.imageUrl) return false;
+    if (seen.has(t.id)) return false;
     seen.add(t.id);
     return true;
   });
-
-  // Fetch audio features for mood computation later
-  const audioFeatures = await fetchAudioFeatures(token, candidates.map((t) => t.id));
 
   // Pick 10 shuffled candidates
   const selected = shuffle(candidates).slice(0, 10);
   if (!selected.length) return null;
 
+  // Fetch genres for all selected tracks from Deezer in parallel
+  const genresList = await Promise.all(
+    selected.map((t) => fetchDeezerGenres(t.name, t.artists[0] ?? '')),
+  );
+
   // Upsert items into the items table
-  const itemUpserts = selected.map((t) => ({
+  const itemUpserts = selected.map((t, i) => ({
     spotify_id: t.id,
     type: 'track' as const,
     name: t.name,
     image_url: t.imageUrl,
     preview_url: t.previewUrl,
     artists_json: t.artists,
-    genres_json: [],
-    raw_json: audioFeatures[t.id]
-      ? { audio_features: audioFeatures[t.id] }
-      : {},
+    genres_json: genresList[i],
+    raw_json: {},
   }));
 
-  await supabase
+  // Use ignoreDuplicates:false so preview_url is updated on existing rows
+  const { error: upsertError } = await supabase
     .from('items')
-    .upsert(itemUpserts, { onConflict: 'spotify_id', ignoreDuplicates: false });
+    .upsert(itemUpserts, { onConflict: 'spotify_id,type', ignoreDuplicates: false });
+
+  if (upsertError) {
+    console.error('[ensureDailyQueue] items upsert failed:', upsertError.message);
+    return null;
+  }
 
   // Fetch the item IDs we just upserted
   const { data: itemRows } = await supabase
@@ -428,13 +450,11 @@ async function checkAndGeneratePlaylist(
   const allDone = items.every((i) => i.score !== null || i.skipped);
   if (!allDone) return {};
 
-  // Compute mood from audio features of rated (non-skipped) items
+  // Compute mood from the user's score distribution
   const ratedItems = items.filter((i) => i.score !== null && !i.skipped);
-  const audioFeaturesList = ratedItems
-    .map((i: any) => i.item?.raw_json?.audio_features)
-    .filter(Boolean) as Array<{ valence: number; energy: number }>;
+  const scores = ratedItems.map((i) => i.score as number);
 
-  const mood = computeMood(audioFeaturesList);
+  const mood = computeMood(scores);
 
   // Mark queue complete
   await supabase
@@ -451,14 +471,12 @@ async function checkAndGeneratePlaylist(
 
   if (plErr || !playlist) return {};
 
-  // Add items scored >= 7
-  const highScores = ratedItems
-    .filter((i) => (i.score ?? 0) >= 7)
-    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  // All rated (non-skipped) items, sorted best-first
+  const sorted = [...ratedItems].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
 
-  if (highScores.length) {
+  if (sorted.length) {
     await supabase.from('daily_playlist_items').insert(
-      highScores.map((i, idx) => ({
+      sorted.map((i, idx) => ({
         playlist_id: playlist.id,
         item_id: i.item_id,
         score: i.score,

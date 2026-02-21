@@ -14,8 +14,10 @@ import {
   Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
+import { Audio } from 'expo-av';
 import { useTheme } from '@/hooks/useTheme';
+import { Skeleton } from '@/components/ui/Skeleton';
 import { Text } from '@/components/ui/Text';
 import { Button } from '@/components/ui/Button';
 import { SwipeCard, type Track } from '@/components/SwipeCard';
@@ -28,6 +30,7 @@ import {
   fetchTopArtistIds,
   fetchRecommendations,
 } from '@/lib/spotify';
+import { fetchDeezerPreview, fetchDeezerGenres } from '@/lib/deezer';
 
 const { width, height } = Dimensions.get('window');
 const VISIBLE_CARDS = 3;
@@ -88,6 +91,9 @@ export default function DiscoverScreen() {
   const [addingToList, setAddingToList] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [usingSpotify, setUsingSpotify] = useState(false);
+  const [previewEnabled, setPreviewEnabled] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const soundRef = useRef<Audio.Sound | null>(null);
 
   const currentTrack = tracks[currentIndex] ?? null;
   const visibleTracks = tracks.slice(currentIndex, currentIndex + VISIBLE_CARDS);
@@ -95,6 +101,62 @@ export default function DiscoverScreen() {
   useEffect(() => {
     loadTracks();
   }, []);
+
+  // Stop audio when leaving the screen
+  useFocusEffect(
+    useCallback(() => {
+      return () => { stopAudio(); };
+    }, [])
+  );
+
+  // Pre-warm the Deezer cache for the next 3 tracks so playback starts instantly
+  useEffect(() => {
+    if (tracks.length === 0) return;
+    tracks.slice(currentIndex + 1, currentIndex + 4).forEach((t) => {
+      fetchDeezerPreview(t.name, t.artists[0] ?? '');
+    });
+  }, [currentIndex, tracks]);
+
+  // Auto-play preview when the current track changes (if preview is enabled)
+  useEffect(() => {
+    if (!previewEnabled || !currentTrack) return;
+    fetchDeezerPreview(currentTrack.name, currentTrack.artists[0] ?? '').then((url) => {
+      if (url) playPreview(url);
+      else stopAudio();
+    });
+  }, [currentTrack?.id, previewEnabled]);
+
+  async function stopAudio() {
+    if (soundRef.current) {
+      await soundRef.current.unloadAsync();
+      soundRef.current = null;
+    }
+    setIsPlaying(false);
+  }
+
+  async function playPreview(url: string) {
+    await stopAudio();
+    try {
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: url },
+        { shouldPlay: true, isLooping: true }
+      );
+      soundRef.current = sound;
+      setIsPlaying(true);
+    } catch {
+      setIsPlaying(false);
+    }
+  }
+
+  async function togglePreviewEnabled() {
+    if (previewEnabled) {
+      await stopAudio();
+      setPreviewEnabled(false);
+    } else {
+      await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
+      setPreviewEnabled(true);
+    }
+  }
 
   async function loadTracks() {
     setLoading(true);
@@ -145,9 +207,11 @@ export default function DiscoverScreen() {
             id: t.id,
             name: t.name,
             artists: t.artists,
+            artistIds: t.artistIds,
             albumName: t.albumName,
             imageUrl: t.imageUrl,
             spotifyId: t.id,
+            previewUrl: t.previewUrl ?? undefined,
           });
         }
       }
@@ -204,7 +268,12 @@ export default function DiscoverScreen() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) { dismissSheet(); return; }
 
-    // 1. Upsert track into items cache
+    // 1. Upsert track into items cache (with genres from Deezer)
+    const genres = await fetchDeezerGenres(
+      pendingRating.name,
+      pendingRating.artists[0] ?? '',
+    );
+
     const { data: itemData, error: itemError } = await supabase
       .from('items')
       .upsert({
@@ -212,8 +281,9 @@ export default function DiscoverScreen() {
         type: 'track',
         name: pendingRating.name,
         image_url: pendingRating.imageUrl,
+        preview_url: pendingRating.previewUrl ?? null,
         artists_json: pendingRating.artists,
-        genres_json: [],
+        genres_json: genres,
         raw_json: {},
       }, { onConflict: 'spotify_id,type' })
       .select('id')
@@ -278,14 +348,7 @@ export default function DiscoverScreen() {
   const sheetVisible = pendingRating !== null || ratedTrack !== null;
 
   if (loading) {
-    return (
-      <View style={[styles.root, { backgroundColor: colors.bg, justifyContent: 'center', alignItems: 'center' }]}>
-        <ActivityIndicator color={colors.accent} />
-        <Text variant="caption" color="secondary" style={{ marginTop: spacing[3] }}>
-          Loading your tracks…
-        </Text>
-      </View>
-    );
+    return <DiscoverSkeleton />;
   }
 
   return (
@@ -303,9 +366,18 @@ export default function DiscoverScreen() {
               </Text>
             )}
           </View>
-          <Pressable onPress={() => router.push('/settings')}>
-            <Text style={{ fontSize: 20, color: colors.textSecondary }}>⚙</Text>
-          </Pressable>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing[4] }}>
+            <Pressable onPress={togglePreviewEnabled} hitSlop={12}>
+              <Text style={{
+                fontSize: 18,
+                color: previewEnabled ? colors.accent : colors.textTertiary,
+                opacity: previewEnabled ? 1 : 0.6,
+              }}>♪</Text>
+            </Pressable>
+            <Pressable onPress={() => router.push('/settings')}>
+              <Text style={{ fontSize: 20, color: colors.textSecondary }}>⚙</Text>
+            </Pressable>
+          </View>
         </View>
 
         {/* Card deck or empty state */}
@@ -321,6 +393,7 @@ export default function DiscoverScreen() {
                   totalCards={visibleTracks.length}
                   onSwipeLeft={stackIndex === 0 ? handleSwipeLeft : () => {}}
                   onSwipeRight={stackIndex === 0 ? handleSwipeRight : () => {}}
+                  isPlaying={stackIndex === 0 && previewEnabled && isPlaying}
                 />
               );
             })}
@@ -450,6 +523,38 @@ export default function DiscoverScreen() {
           </View>
         </View>
       )}
+    </View>
+  );
+}
+
+// ─── Skeleton ────────────────────────────────────────────────────────────────
+
+function DiscoverSkeleton() {
+  const { colors } = useTheme();
+  const cardW = width - spacing[5] * 2;
+  return (
+    <View style={[styles.root, { backgroundColor: colors.bg }]}>
+      <SafeAreaView style={{ flex: 1 }} edges={['top']}>
+        {/* Header */}
+        <View style={styles.header}>
+          <View style={{ gap: 5 }}>
+            <Skeleton width={90} height={24} />
+          </View>
+          <Skeleton width={22} height={22} borderRadius={11} />
+        </View>
+
+        {/* Card placeholder */}
+        <View style={styles.deckArea}>
+          <Skeleton width={cardW} height={cardW * 1.25} borderRadius={radii['2xl']} />
+        </View>
+
+        {/* Hint row */}
+        <View style={styles.hint}>
+          <Skeleton width={48} height={12} />
+          <Skeleton width={72} height={12} />
+          <Skeleton width={48} height={12} />
+        </View>
+      </SafeAreaView>
     </View>
   );
 }
